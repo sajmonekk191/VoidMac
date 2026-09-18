@@ -1,0 +1,12 @@
+.build/
+*.xcodeproj
+.DS_Store
+.swiftpm/
+build/
+
+# game captures used by Tools/hud-regression-check: they show the player's in-game name
+Tools/hud-regression-check/fixtures/
+
+# scratch copies kept next to the project, not part of the build
+/MonsterBars.swift
+/PixelSearch.swift
