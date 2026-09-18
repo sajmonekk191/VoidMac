@@ -160,7 +160,7 @@ final class AbilityHud: @unchecked Sendable {
             guard fine.score >= 0.6 else { continue }
             let size = fine.size
             let templates = arts.map { resample(icon: $0, to: size) }
-            for pitch in (size * 11 / 10)...(size * 2) {
+            for pitch in (size * 115 / 100)...(size * 135 / 100) {
                 let start = fine.x - slot * pitch
                 guard start >= 0, start + 3 * pitch + size < strip.width else { continue }
                 for y in max(0, fine.y - 8)...(fine.y + 8) where y + size < strip.height {
