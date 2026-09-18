@@ -6,7 +6,17 @@ A native orbwalker and autoaim for League of Legends on Apple Silicon Macs, writ
 (ScreenCaptureKit), Riot's Live Client Data API on `127.0.0.1:2999`, published champion/spell data,
 and synthesized input. There is no injection, no hooking and no process access.
 
-![Void# in game](docs/demo.gif)
+## Demo
+
+[▶ Gameplay clip (9 s)](media/gameplay.mp4) — orbwalking and combos in a practice game.
+
+### In-game menu
+
+![In-game menu](media/IngameMenu.png)
+
+### Settings panel
+
+![Settings panel](media/Menu.png)
 
 ## Requirements
 
@@ -69,6 +79,8 @@ Flee and the helicopter are unbound by default. Every key is rebindable in the p
 ```
 Sources/VoidMac/      the app: capture, detection, orbwalker, autoaim, combos, UI
 Tools/                generators, log analysis, the HUD regression check, packaging
+media/                the gameplay clip and the UI screenshots used above
+CLAUDE.md             the full engineering write-up (in Czech): every subsystem and why it is built that way
 ```
 
 Config lives in `~/Library/Application Support/VoidMac/config.json`, the log in `~/Library/Logs/VoidMac.log`.

@@ -242,6 +242,7 @@ enum PixelSearch {
         let middle = top + height / 2
         guard extendRun(frame, start: start, end: start, y: middle, limit: config.minFrameWidth, maxGap: max(4, config.minHeight / 2), isFill: isBarFrame) - start >= config.minFrameWidth else { return }
         let fill = extendRun(frame, start: start, end: start, y: middle, limit: config.maxRun, maxGap: max(4, config.minHeight), isFill: isEnemyRed) - start
+        guard fill >= max(4, config.barWidth / 20) else { return }
         hits.append(PixelHit(x: start, y: top, width: config.barWidth, height: height, fill: fill))
     }
 
