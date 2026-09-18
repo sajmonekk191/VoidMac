@@ -8,7 +8,9 @@ and synthesized input. There is no injection, no hooking and no process access.
 
 ## Demo
 
-[▶ Gameplay clip (9 s)](media/gameplay.mp4) — orbwalking and combos in a practice game.
+![Gameplay](media/gameplay.gif)
+
+Orbwalking and combos in a practice game.
 
 ### In-game menu
 
@@ -79,7 +81,7 @@ Flee and the helicopter are unbound by default. Every key is rebindable in the p
 ```
 Sources/VoidMac/      the app: capture, detection, orbwalker, autoaim, combos, UI
 Tools/                generators, log analysis, the HUD regression check, packaging
-media/                the gameplay clip and the UI screenshots used above
+media/                the gameplay loop and the UI screenshots used above
 CLAUDE.md             the full engineering write-up (in Czech): every subsystem and why it is built that way
 ```
 
