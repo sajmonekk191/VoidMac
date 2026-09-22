@@ -52,9 +52,11 @@ struct VisionSnapshot: Equatable {
     var motionMs = -1e9
     var cameraLocked = true
     var abilityReady: [String: Bool] = [:]
-    var hudText = ""
+    var hud = HudStatus()
     var projection: GroundProjection?
     var rangeText = ""
+
+    var hudText: String { hud.text }
 
     /** Own champion's feet in frame px: from the range ring when fresh, else the own bar plus the learned bar-to-feet distance, else the screen centre when allowed. */
     func selfPoint(cfg: EngineSettings) -> CGPoint? {

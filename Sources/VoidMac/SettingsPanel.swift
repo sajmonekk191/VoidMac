@@ -154,14 +154,14 @@ struct SettingsPanel: View {
     private var orbwalkerTab: some View {
         Group {
             Card(title: "Attack method", icon: "scope") {
-                SettingRow(label: "Mode", hint: settings.attackMode == "attackmove" ? "Presses the attack-move key and left-clicks at the cursor; the cursor stays put and the game attacks the nearest enemy (a champion with Target Champions Only)" : "The cursor jumps to the target for ~14 ms, right-clicks and returns to where your hand is") {
+                SettingRow(label: "Mode", hint: settings.attackMode == .attackMove ? "Presses the attack-move key and left-clicks at the cursor; the cursor stays put and the game attacks the nearest enemy (a champion with Target Champions Only)" : "The cursor jumps to the target for ~14 ms, right-clicks and returns to where your hand is") {
                     Picker("", selection: $settings.attackMode) {
-                        Text("Click on target").tag("click")
-                        Text("Attack Move").tag("attackmove")
+                        Text("Click on target").tag(AttackMode.click)
+                        Text("Attack Move").tag(AttackMode.attackMove)
                     }
                     .pickerStyle(.segmented).labelsHidden().frame(width: 220)
                 }
-                if settings.attackMode == "attackmove" {
+                if settings.attackMode == .attackMove {
                     SettingRow(label: "Attack-move key", hint: "Default A = Player Attack Move in LoL") { KeyBindButton(keyCode: $settings.attackMoveKeyCode) }
                     SettingRow(label: "Left-click after the key", hint: settings.attackMoveClick ? "For the default LoL bind A (Player Attack Move waits for a click); the click goes to the cursor outside the HUD and minimap" : "Turn off only with a one-key Player Attack Move Click bound") {
                         Toggle("", isOn: $settings.attackMoveClick).toggleStyle(.switch).labelsHidden()
@@ -170,11 +170,11 @@ struct SettingsPanel: View {
                     SettingRow(label: "Click hold on target", hint: "\(settings.clickHoldMs) ms between press and release") { intSlider($settings.clickHoldMs, 1...30) }
                     SettingRow(label: "Delay before return", hint: "\(settings.clickSettleMs) ms; the cursor always stays on the target at least one game frame + 2 ms (the game reads the cursor once per frame), \(state.fps > 0 ? "now \(Int(1000 / state.fps + 2)) ms" : "by fps")") { intSlider($settings.clickSettleMs, 0...40) }
                 }
-                SettingRow(label: "Target selection", hint: settings.targetMode == "center" ? "Enemy nearest the screen centre (fastest)" : (settings.targetMode == "lowest" ? "Enemy with the lowest HP share" : "Enemy nearest the cursor")) {
+                SettingRow(label: "Target selection", hint: settings.targetMode == .center ? "Enemy nearest the screen centre (fastest)" : (settings.targetMode == .lowest ? "Enemy with the lowest HP share" : "Enemy nearest the cursor")) {
                     Picker("", selection: $settings.targetMode) {
-                        Text("Centre").tag("center")
-                        Text("Lowest HP").tag("lowest")
-                        Text("Near cursor").tag("cursor")
+                        Text("Centre").tag(TargetMode.center)
+                        Text("Lowest HP").tag(TargetMode.lowest)
+                        Text("Near cursor").tag(TargetMode.cursor)
                     }
                     .pickerStyle(.segmented).labelsHidden().frame(width: 260)
                 }
@@ -243,7 +243,7 @@ struct SettingsPanel: View {
                 SettingRow(label: "Click humanisation", hint: "±\(Int(settings.clickJitter)) px randomly around the click point") {
                     Slider(value: $settings.clickJitter, in: 0...10, step: 1).frame(width: 220)
                 }
-                SettingRow(label: "Flee key", hint: "Hold = only move toward the cursor, no attacks and no windup wait") { KeyBindButton(keyCode: $settings.fleeKeyCode, clearable: true) }
+                SettingRow(label: "Waveclear key", hint: "Hold = kite as usual but every attack is an attack-move at the cursor, so the game hits the nearest unit (clears minions); no combos (default V)") { KeyBindButton(keyCode: $settings.waveclearKeyCode, clearable: true) }
             }
             Card(title: "Kiting", icon: "timer") {
                 Text("Attack → no movement during the windup → move-clicks at the cursor → next attack exactly after 1/AS. Windup: \(windupText).")
@@ -307,8 +307,8 @@ struct SettingsPanel: View {
             Card(title: "Image source", icon: "display") {
                 SettingRow(label: "Capture mode", hint: "Automatic = the game window, and when it yields no frame within 2 s (Full Screen), a display crop") {
                     Picker("", selection: $settings.captureMode) {
-                        Text("Automatic").tag("window")
-                        Text("Display").tag("display")
+                        Text("Automatic").tag(CaptureMode.window)
+                        Text("Display").tag(CaptureMode.display)
                     }
                     .pickerStyle(.segmented).labelsHidden().frame(width: 180)
                 }

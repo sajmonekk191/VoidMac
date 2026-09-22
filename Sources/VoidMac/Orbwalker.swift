@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import os
 
 /** Hand movement measured from the OS cursor between our own position posts; queries happen only where a stall cannot show. */
 struct HandTracker {
@@ -57,8 +58,6 @@ final class Orbwalker: @unchecked Sendable {
     let aim: Autoaim
     let combo = ComboEngine()
 
-    var paused = false
-    private var lastAttackMs = -1e9
     private var nextMoveMs = 0.0
     private var lastSnapshotMs = 0.0
     private var lastNoTargetLogMs = -1e9
@@ -76,6 +75,7 @@ final class Orbwalker: @unchecked Sendable {
     private var activationPressedMs = -1e9
     private var lastPanLogMs = -1e9
     private var lastPhantomLogMs = -1e9
+    private let heldKeys = NSLock()
     private var rangeKeyHeld = false
     private var championKeyHeld = false
     private var championHeldViaMouse = false
@@ -87,6 +87,8 @@ final class Orbwalker: @unchecked Sendable {
     private var pendingTargetID = 0
     private var pendingFillAtClick = 0
     private var attackConfirmText = ""
+    private var attackConfirmedMs = 0.0
+    private var moveLogPendingMs = 0.0
     /** One armed click waiting for its target's bar to drop; `bestFill` is the lowest fill seen from `fromMs` (this click's own windup) on, so neither a one-pixel hit nor the previous attack's damage can decide it. */
     private struct MissCheck {
         let id: Int, fillAtClick: Int, clickedMs: Double, fromMs: Double, text: String, champion: String, depth: Double
@@ -111,17 +113,55 @@ final class Orbwalker: @unchecked Sendable {
     private var lastKills = -1
     private var emoteDueMs = 0.0
 
-    private(set) var activationHeld = false
-    private(set) var fleeHeld = false
-    private(set) var spinning = false
-    private(set) var currentWindup = 0.0
-    private(set) var currentWindupMs = 0.0
-    private(set) var attacks = 0
-    private var targetMarker: (point: CGPoint, text: String, atMs: Double)?
+    private var waveclearHeld = false
+    private var spinning = false
 
-    private let statusLock = NSLock()
-    private var statusStorage = "startuje"
-    private var aimAllowedStorage = false
+    /** Everything other threads read or set, under one lock: the loop publishes, the UI and the vision read, the UI pauses. */
+    private struct Shared {
+        var status = "starting"
+        var aimAllowed = false
+        var paused = false
+        var activationHeld = false
+        var windup = 0.0
+        var windupMs = 0.0
+        var attacks = 0
+        var lastAttackMs = -1e9
+        var target: (point: CGPoint, text: String, atMs: Double)?
+    }
+
+    private let shared = OSAllocatedUnfairLock(initialState: Shared())
+
+    /** Set by the UI while the panel is open or the pointer rests on a menu window: the loop clicks nothing and lets the held keys go. */
+    var paused: Bool {
+        get { shared.withLock { $0.paused } }
+        set { shared.withLock { $0.paused = newValue } }
+    }
+
+    private(set) var activationHeld: Bool {
+        get { shared.withLock { $0.activationHeld } }
+        set { shared.withLock { $0.activationHeld = newValue } }
+    }
+
+    private(set) var currentWindup: Double {
+        get { shared.withLock { $0.windup } }
+        set { shared.withLock { $0.windup = newValue } }
+    }
+
+    private(set) var currentWindupMs: Double {
+        get { shared.withLock { $0.windupMs } }
+        set { shared.withLock { $0.windupMs = newValue } }
+    }
+
+    private(set) var attacks: Int {
+        get { shared.withLock { $0.attacks } }
+        set { shared.withLock { $0.attacks = newValue } }
+    }
+
+    private var lastAttackMs: Double {
+        get { shared.withLock { $0.lastAttackMs } }
+        set { shared.withLock { $0.lastAttackMs = newValue } }
+    }
+
     /** Click point of the enemy chosen in the last 400 ms, in screen points, for the overlay marker. */
     var currentTarget: CGPoint? {
         currentTargetInfo?.point
@@ -129,7 +169,7 @@ final class Orbwalker: @unchecked Sendable {
 
     /** The chosen enemy's click point and identity text ("Cho'Gath lvl 6 via name") while fresh. */
     var currentTargetInfo: (point: CGPoint, text: String)? {
-        statusLock.withLock { targetMarker.flatMap { nowMs() - $0.atMs < 400 ? ($0.point, $0.text) : nil } }
+        shared.withLock { $0.target.flatMap { nowMs() - $0.atMs < 400 ? ($0.point, $0.text) : nil } }
     }
 
     /** Attack cycle for the HUD: ms since the last attack, the period 1/AS and the windup length. */
@@ -140,12 +180,12 @@ final class Orbwalker: @unchecked Sendable {
     }
 
     var statusText: String {
-        get { statusLock.withLock { statusStorage } }
+        get { shared.withLock { $0.status } }
         set {
-            let changed: Bool = statusLock.withLock {
-                let c = statusStorage != newValue
-                statusStorage = newValue
-                return c
+            let changed: Bool = shared.withLock { state in
+                let changed = state.status != newValue
+                state.status = newValue
+                return changed
             }
             if changed { Log.info("orbwalker: \(newValue)") }
         }
@@ -157,7 +197,7 @@ final class Orbwalker: @unchecked Sendable {
         self.game = game
         self.vision = vision
         self.aim = aim
-        aim.canAim = { [weak self] in self?.statusLock.withLock { self?.aimAllowedStorage ?? false } ?? false }
+        aim.canAim = { [weak self] in self?.shared.withLock { $0.aimAllowed } ?? false }
         vision.motionWanted = { [weak self] in self?.activationHeld ?? false }
     }
 
@@ -220,15 +260,33 @@ final class Orbwalker: @unchecked Sendable {
         thread.start()
     }
 
+    /** Lets go of the Show Range and champion-only binds this process holds; safe from any thread. */
     func releaseHeldKeys() {
         let cfg = settings.engine
-        if rangeKeyHeld {
-            Input.key(cfg.attackRangeKeyCode, down: false)
-            rangeKeyHeld = false
+        heldKeys.withLock {
+            if rangeKeyHeld {
+                Input.key(cfg.attackRangeKeyCode, down: false)
+                rangeKeyHeld = false
+            }
+            if championKeyHeld {
+                if championHeldViaMouse { Input.middleMouse(down: false) } else { Input.key(cfg.championOnlyKeyCode, down: false) }
+                championKeyHeld = false
+            }
         }
-        if championKeyHeld {
-            if championHeldViaMouse { Input.middleMouse(down: false) } else { Input.key(cfg.championOnlyKeyCode, down: false) }
-            championKeyHeld = false
+    }
+
+    /** Holds the Show Range and champion-only binds while the orbwalker is active. */
+    private func holdKeys(_ cfg: EngineSettings) {
+        heldKeys.withLock {
+            if cfg.showAttackRange && !rangeKeyHeld {
+                Input.key(cfg.attackRangeKeyCode, down: true)
+                rangeKeyHeld = true
+            }
+            if cfg.attackChampionOnly && !championKeyHeld {
+                championHeldViaMouse = cfg.championOnlyMiddleMouse
+                if championHeldViaMouse { Input.middleMouse(down: true) } else { Input.key(cfg.championOnlyKeyCode, down: true) }
+                championKeyHeld = true
+            }
         }
     }
 
@@ -245,12 +303,12 @@ final class Orbwalker: @unchecked Sendable {
             activationHeld = held
             if let blocker = blocker(for: snap) {
                 statusText = blocker
-                statusLock.withLock { aimAllowedStorage = false }
+                shared.withLock { $0.aimAllowed = false }
                 releaseHeldKeys()
                 sleepMs(20)
                 continue
             }
-            statusLock.withLock { aimAllowedStorage = true }
+            shared.withLock { $0.aimAllowed = true }
             game.capture.setRate(cfg.captureFps)
             currentWindup = cfg.windup(for: snap.championName)
             currentWindupMs = cfg.windupMs(for: snap.championName, attackSpeed: snap.attackSpeed)
@@ -259,14 +317,13 @@ final class Orbwalker: @unchecked Sendable {
                 continue
             }
             handleEmote(snap, cfg)
-            fleeHeld = cfg.fleeKeyCode != KeyNames.none && Input.isKeyDown(cfg.fleeKeyCode)
-            if fleeHeld {
-                statusText = "FLEE (move only)"
+            waveclearHeld = cfg.waveclearKeyCode != KeyNames.none && Input.isKeyDown(cfg.waveclearKeyCode)
+            if waveclearHeld {
+                statusText = "WAVECLEAR (attack-move)"
                 releaseHeldKeys()
                 spinning = false
-                pendingClickMs = 0
                 comboArmed = false
-                moveOnly(cfg)
+                waveClear(snap, cfg)
                 continue
             }
             if toggleHelicopter(cfg) {
@@ -286,15 +343,7 @@ final class Orbwalker: @unchecked Sendable {
             }
             statusText = "ACTIVE"
             checkTimers()
-            if cfg.showAttackRange && !rangeKeyHeld {
-                Input.key(cfg.attackRangeKeyCode, down: true)
-                rangeKeyHeld = true
-            }
-            if cfg.attackChampionOnly && !championKeyHeld {
-                championHeldViaMouse = cfg.championOnlyMiddleMouse
-                if championHeldViaMouse { Input.middleMouse(down: true) } else { Input.key(cfg.championOnlyKeyCode, down: true) }
-                championKeyHeld = true
-            }
+            holdKeys(cfg)
             step(snap, cfg)
         }
     }
@@ -377,7 +426,7 @@ final class Orbwalker: @unchecked Sendable {
                     Log.warn("no fresh frame for \(Int(frameAge)) ms, not attacking")
                 }
             } else if let target = chooseTarget(vis, range: snap.attackRange, cfg: cfg) {
-                if cfg.attackMode == "attackmove" { attackMove(target, cfg) } else { clickAttack(target, cfg, frameAge: Int(frameAge)) }
+                if cfg.attackMode == .attackMove { attackMove(target, cfg) } else { clickAttack(target, cfg, frameAge: Int(frameAge)) }
                 return
             } else if now - lastNoTargetLogMs > 5000 {
                 lastNoTargetLogMs = now
@@ -388,13 +437,18 @@ final class Orbwalker: @unchecked Sendable {
             let fresh = comboFresh
             comboFresh = false
             let trigger = fresh ? attackConfirmText : "between attacks, \(Int(attackDue - now)) ms to the next"
-            if runCombo(snap, cfg, trigger: trigger, slackMs: attackDue - now) {
+            if runCombo(snap, cfg, trigger: trigger, slackMs: attackDue - now, fresh: fresh) {
                 comboArmed = false
                 return
             }
         }
         if pendingClickMs == 0, now >= nextMoveMs {
-            moveClick(cfg)
+            let clicked = moveClick(cfg)
+            if clicked, moveLogPendingMs > 0 {
+                let real = max(0, currentWindupMs - Double(cfg.extraWindupMs))
+                Log.info("move +\(Int(now - moveLogPendingMs)) ms after the attack click (confirmed +\(Int(attackConfirmedMs - moveLogPendingMs)) ms: \(attackConfirmText); windup \(Int(currentWindupMs)) ms, real \(Int(real)) ms)")
+                moveLogPendingMs = 0
+            }
             nextMoveMs = now + Double(Int.random(in: min(cfg.moveClickMinMs, cfg.moveClickMaxMs)...max(cfg.moveClickMinMs, cfg.moveClickMaxMs)))
             return
         }
@@ -428,6 +482,7 @@ final class Orbwalker: @unchecked Sendable {
         }
         lastAttackMs = max(lastAttackMs, max(pendingClickMs, castLockUntilMs))
         attackConfirmText = text
+        attackConfirmedMs = now
         pendingClickMs = 0
         nextMoveMs = now
     }
@@ -453,7 +508,7 @@ final class Orbwalker: @unchecked Sendable {
     }
 
     /** Casts the next enabled ability that is ready: attack resets right after a confirmed attack, the others timed so the cast ends when the next attack is due (or right after the attack when the cast fits before it); true when something was cast. */
-    private func runCombo(_ snap: PlayerSnapshot, _ cfg: EngineSettings, trigger: String, slackMs: Double) -> Bool {
+    private func runCombo(_ snap: PlayerSnapshot, _ cfg: EngineSettings, trigger: String, slackMs: Double, fresh: Bool) -> Bool {
         let steps = cfg.combo(for: snap.championName).steps.filter { $0.enabled }
         guard !steps.isEmpty, slackMs > -600 else { return false }
         let hud = vision.latest.abilityReady
@@ -468,8 +523,12 @@ final class Orbwalker: @unchecked Sendable {
                 continue
             }
             let castMs = combo.castLockMs(slot: step.slot, spec: spec)
-            let deliveryMs = onTargetFloorMs(cfg) + (step.aim == "target" ? Double(cfg.aim.settleMs) + 2 * onTargetFloorMs(cfg) : 0)
+            let deliveryMs = onTargetFloorMs(cfg) + (step.aim == .target ? Double(cfg.aim.settleMs) + 2 * onTargetFloorMs(cfg) : 0)
             let resets = cfg.attackResets && ChampionResets.resets(champion: snap.championName, slot: step.slot)
+            if resets, !fresh {
+                logSkip(step.slot, "attack reset waits for the next confirmed attack")
+                continue
+            }
             if !resets {
                 if cfg.combos.castBeforeAttack {
                     guard AttackTiming.castFits(slackMs: slackMs, castMs: castMs + deliveryMs, overrunMs: cfg.combos.neverDelayAttack ? 0 : AttackTiming.castOverrunMs) else { continue }
@@ -487,7 +546,7 @@ final class Orbwalker: @unchecked Sendable {
             }
             let keyCode = cfg.aimKey(for: step.slot)
             var text: String
-            if step.aim == "target" {
+            if step.aim == .target {
                 var reason = ""
                 guard let plan = aim.makePlan(slot: step.slot, keyCode: keyCode, cfg: cfg, lockedEnemyID: comboTargetID, reason: &reason) else {
                     logSkip(step.slot, reason)
@@ -495,7 +554,7 @@ final class Orbwalker: @unchecked Sendable {
                 }
                 performAim(plan, cfg, hold: false)
                 text = "\(spec?.name ?? step.slot) → \(Int(plan.distanceUnits)) u"
-            } else if step.aim == "cursor", let dash = dashDestination(spec: spec, snap: snap, cfg: cfg) {
+            } else if step.aim == .cursor, let dash = dashDestination(spec: spec, snap: snap, cfg: cfg) {
                 if let sideways = dash.sideways, let spec {
                     let plan = AimPlan(slot: step.slot, keyCode: keyCode, spec: spec, targeting: .location, point: sideways, targetPx: .zero, predictedPx: .zero,
                                        enemyID: comboTargetID, predictedMs: 0, distanceUnits: 0, castMode: cfg.aim.castMode, createdMs: nowMs())
@@ -503,11 +562,11 @@ final class Orbwalker: @unchecked Sendable {
                     text = "\(spec.name) sideways (the cursor would leave range)"
                 } else {
                     let pressedAt = nowMs()
-                    pressKey(keyCode, cfg: cfg, click: cfg.aim.castMode == "normal")
+                    pressKey(keyCode, cfg: cfg, click: cfg.aim.castMode == .normal)
                     beginCastLock(slot: step.slot, spec: spec, pressedAt: pressedAt)
                     text = "\(spec?.name ?? step.slot) toward the cursor"
                 }
-            } else if step.aim == "cursor" {
+            } else if step.aim == .cursor {
                 logSkip(step.slot, "no dash direction keeps the target in range")
                 continue
             } else {
@@ -583,6 +642,7 @@ final class Orbwalker: @unchecked Sendable {
         lastClickMs = clickedAt
         lastAttackMs = clickedAt
         pendingClickMs = clickedAt
+        moveLogPendingMs = clickedAt
         pendingTargetID = target.track.id
         pendingFillAtClick = target.track.fill
         nextMoveMs = .infinity
@@ -649,18 +709,18 @@ final class Orbwalker: @unchecked Sendable {
         let score: (AttackTarget) -> Double
         let dummyPenalty: (AttackTarget) -> Double = { $0.track.champion == ChampionModels.dummyKey ? 1e6 : 0 }
         switch cfg.targetMode {
-        case "lowest":
+        case .lowest:
             score = { $0.track.fillRatio + dummyPenalty($0) }
-        case "cursor":
+        case .cursor:
             let cursor = Input.mousePosition()
             score = { hypot($0.point.x - cursor.x, $0.point.y - cursor.y) + dummyPenalty($0) }
-        default:
+        case .center:
             score = { hypot($0.point.x - anchor.x, $0.point.y - anchor.y) + dummyPenalty($0) }
         }
         guard let best = candidates.min(by: { score($0) < score($1) }) else { return nil }
         var chosen = best
         if cfg.stickyTarget, let current = candidates.first(where: { $0.track.id == targetID }), current.track.id != best.track.id {
-            let keep = cfg.targetMode == "lowest" ? score(current) <= score(best) + 0.15 : score(current) <= score(best) * 1.3
+            let keep = cfg.targetMode == .lowest ? score(current) <= score(best) + 0.15 : score(current) <= score(best) * 1.3
             if keep { chosen = current }
         }
         targetID = chosen.track.id
@@ -672,29 +732,63 @@ final class Orbwalker: @unchecked Sendable {
             chosen.depth = click.depth
             chosen.probe = click.probe
         }
-        statusLock.withLock { targetMarker = (chosen.point, chosen.track.identity, nowMs()) }
+        let marker = (point: chosen.point, text: chosen.track.identity, atMs: nowMs())
+        shared.withLock { $0.target = marker }
         return chosen
     }
 
     /** Move-click on the cursor unless it sits inside the hold zone around the champion. */
-    private func moveClick(_ cfg: EngineSettings) {
+    @discardableResult
+    private func moveClick(_ cfg: EngineSettings) -> Bool {
         let cursor = Input.mousePosition()
         if cfg.holdRadius > 0, let selfPt = selfPoint(cfg: cfg) {
             let radius = cfg.holdRadius * game.capture.windowFrame.width / 1920
-            if hypot(cursor.x - selfPt.x, cursor.y - selfPt.y) <= radius { return }
+            if hypot(cursor.x - selfPt.x, cursor.y - selfPt.y) <= radius { return false }
         }
         Input.rightClick(at: cursor)
+        return true
     }
 
-    /** Flee: no attacks, no windup wait, just the kiting cadence toward the cursor. */
-    private func moveOnly(_ cfg: EngineSettings) {
+    /** Waveclear: full kiting cadence, but every attack is an attack-move at the cursor so the game hits the nearest unit; no target detection and no combos. */
+    private func waveClear(_ snap: PlayerSnapshot, _ cfg: EngineSettings) {
         let now = nowMs()
-        if now >= nextMoveMs || !nextMoveMs.isFinite {
+        if pendingClickMs > 0 { confirmAttack(now, cfg) }
+        let attackDue = lastAttackMs + 1000.0 / snap.attackSpeed
+        if pendingClickMs == 0, now >= attackDue {
+            let cursor = Input.mousePosition()
+            guard cursorInSafeArea(cursor) else {
+                if now - lastNoTargetLogMs > 1000 {
+                    lastNoTargetLogMs = now
+                    Log.warn("waveclear skipped: cursor over HUD/minimap at (\(Int(cursor.x)), \(Int(cursor.y)))")
+                }
+                sleepMs(8)
+                return
+            }
+            Input.key(cfg.attackMoveKeyCode, down: true)
+            spinMs(6)
+            Input.key(cfg.attackMoveKeyCode, down: false)
+            if cfg.attackMoveClick {
+                spinMs(6)
+                Input.leftClick(at: cursor)
+            }
+            let pressedAt = nowMs()
+            lastAttackMs = pressedAt
+            pendingClickMs = pressedAt
+            pendingTargetID = -1
+            pendingFillAtClick = 0
+            nextMoveMs = .infinity
+            moveLogPendingMs = 0
+            attacks += 1
+            Log.info("waveclear: attack-move at (\(Int(cursor.x)), \(Int(cursor.y))), key \(KeyNames.name(cfg.attackMoveKeyCode)); windup \(Int(currentWindupMs)) ms")
+            return
+        }
+        if pendingClickMs == 0, now >= nextMoveMs {
             moveClick(cfg)
             nextMoveMs = now + Double(Int.random(in: min(cfg.moveClickMinMs, cfg.moveClickMaxMs)...max(cfg.moveClickMinMs, cfg.moveClickMaxMs)))
-        } else {
-            lastSnapshotMs = vision.waitForFresh(after: lastSnapshotMs, maxMs: Int(min(6, max(1, nextMoveMs - now)))).atMs
+            return
         }
+        let wake = pendingClickMs > 0 ? now + 3 : min(nextMoveMs, max(attackDue, now + 4))
+        lastSnapshotMs = vision.waitForFresh(after: lastSnapshotMs, maxMs: min(6, max(1, Int(wake - now)))).atMs
     }
 
     /** Own champion's ground point in screen points from the vision, when it saw a frame in the last 200 ms. */
@@ -902,7 +996,7 @@ final class Orbwalker: @unchecked Sendable {
             spinMs(cfg.aim.settleMs)
             waitForFrames(2, maxMs: 40)
             Input.key(plan.keyCode, down: false)
-        } else if plan.castMode == "normal" {
+        } else if plan.castMode == .normal {
             Input.key(plan.keyCode, down: true)
             spinMs(cfg.aim.holdMs)
             Input.key(plan.keyCode, down: false)
@@ -944,9 +1038,9 @@ final class Orbwalker: @unchecked Sendable {
         let restored = hand.restoredPoint(from: origin)
         hand.move(to: restored)
         beginCastLock(slot: plan.slot, spec: plan.spec, pressedAt: keyPressedAt)
-        let text = "\(plan.spec?.name ?? plan.slot) → \(Int(current.distanceUnits)) u" + (current.predictedMs > 0 ? ", predikce \(Int(current.predictedMs)) ms" : "")
+        let text = "\(plan.spec?.name ?? plan.slot) → \(Int(current.distanceUnits)) u" + (current.predictedMs > 0 ? ", prediction \(Int(current.predictedMs)) ms" : "")
         aim.record(slot: plan.slot, text: text)
-        Log.info("aim \(plan.slot) \(plan.spec?.id ?? "?") (\(plan.targeting.rawValue), \(plan.castMode)): target px (\(Int(current.targetPx.x)), \(Int(current.targetPx.y))) -> (\(Int(current.predictedPx.x)), \(Int(current.predictedPx.y))), \(Int(current.distanceUnits)) units, prediction \(Int(current.predictedMs)) ms; settle \(Int(settledMs)) ms, held \(Int(heldMs)) ms, total \(Int(nowMs() - aimStarted)) ms; cursor (\(Int(origin.x)), \(Int(origin.y))) -> (\(Int(current.point.x)), \(Int(current.point.y))) -> (\(Int(restored.x)), \(Int(restored.y)))")
+        Log.info("aim \(plan.slot) \(plan.spec?.id ?? "?") (\(plan.targeting.rawValue), \(plan.castMode.rawValue)): target px (\(Int(current.targetPx.x)), \(Int(current.targetPx.y))) -> (\(Int(current.predictedPx.x)), \(Int(current.predictedPx.y))), \(Int(current.distanceUnits)) units, prediction \(Int(current.predictedMs)) ms; settle \(Int(settledMs)) ms, held \(Int(heldMs)) ms, total \(Int(nowMs() - aimStarted)) ms; cursor (\(Int(origin.x)), \(Int(origin.y))) -> (\(Int(current.point.x)), \(Int(current.point.y))) -> (\(Int(restored.x)), \(Int(restored.y)))")
     }
 
     /** True when the cursor is over the game world, not the bottom HUD or the minimap corner. */
@@ -971,7 +1065,9 @@ final class Orbwalker: @unchecked Sendable {
         }
     }
 
+    private static let stampFormatter = ISO8601DateFormatter()
+
     private static func stamp() -> String {
-        ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        stampFormatter.string(from: Date()).replacingOccurrences(of: ":", with: "-")
     }
 }

@@ -3,6 +3,7 @@ import Combine
 import Foundation
 
 setvbuf(stdout, nil, _IONBF, 0)
+atexit { Log.flush() }
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let settings = Settings.load()
@@ -80,9 +81,6 @@ game.start()
 vision.start()
 orbwalker.start()
 
-let engineRefresh = settings.objectWillChange
-    .receive(on: DispatchQueue.main)
-    .sink { settings.refreshEngine() }
 let autosave = settings.objectWillChange
     .debounce(for: .milliseconds(400), scheduler: DispatchQueue.main)
     .sink { settings.save() }

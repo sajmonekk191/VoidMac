@@ -17,12 +17,31 @@ private struct IconRef {
     var gray: Patch
 }
 
+/** One slot's reading in a frame: castable or not, and the gold share of its frame line. */
+struct HudReading: Equatable {
+    let slot: String
+    let ready: Bool
+    let gold: Float
+}
+
+/** The reader's state for the panel and the log: a message, or the readings of the last frame (formatted only when shown). */
+struct HudStatus: Equatable {
+    var message = ""
+    var readings: [HudReading] = []
+
+    var text: String {
+        guard !readings.isEmpty else { return message }
+        return "HUD: " + readings.map { "\($0.slot) \($0.ready ? "✓" : "✗") \(String(format: "%.2f", $0.gold))" }.joined(separator: "  ")
+    }
+}
+
 /** Reads ability availability from the HUD: the icons are located once per game by matching the Data Dragon images, then the golden frame the HUD draws around castable abilities is checked every frame. */
 final class AbilityHud: @unchecked Sendable {
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "voidmac.hud", qos: .background)
     private var refs: [IconRef] = []
     private var size = 0
+    private var pitch = 0
     private var champion = ""
     private var frameSize = (width: 0, height: 0)
     private var ready: [String: Bool] = [:]
@@ -32,47 +51,48 @@ final class AbilityHud: @unchecked Sendable {
     private var everLocated = false
     private var lastCheckMs = -1e9
     private var checkFailures = 0
-    private var statusStorage = "HUD: icons not located yet"
+    private var state = HudStatus(message: "HUD: icons not located yet")
 
-    /** The reader's own words for the panel; taken under the lock its writers use. */
-    var statusText: String { lock.withLock { statusStorage } }
+    /** The reader's state, taken under the lock its writers use. */
+    var status: HudStatus { lock.withLock { state } }
+
+    var statusText: String { status.text }
 
     /** Availability of the asked-for slots in this frame, empty until the icons are located; requests a background locate when needed. */
     func read(frame: Frame, champion current: String, icons: [String: String], slots: [String]) -> [String: Bool] {
         guard !current.isEmpty, icons.count == 4, !slots.isEmpty else { return [:] }
-        let known: [IconRef]? = lock.withLock {
+        let located: (refs: [IconRef], size: Int, pitch: Int, ready: [String: Bool])? = lock.withLock {
             if champion != current || frameSize.width != frame.width || frameSize.height != frame.height { refs = [] }
-            return refs.isEmpty ? nil : refs
+            return refs.isEmpty ? nil : (refs, size, pitch, ready)
         }
-        guard let known else {
+        guard let located else {
             requestLocate(frame: frame, champion: current, icons: icons)
             return [:]
         }
-        let checked = known.filter { slots.contains($0.slot) }
         var result: [String: Bool] = [:]
-        var parts: [String] = []
-        for ref in checked {
-            let line = Self.frameLine(frame: frame, x: ref.x, y: ref.y, size: size)
-            let previous = lock.withLock { ready[ref.slot] }
-            let available = line.gold >= 0.9 ? true : (line.gold <= 0.85 ? false : (previous ?? false))
+        var readings: [HudReading] = []
+        for ref in located.refs where slots.contains(ref.slot) {
+            let gold = Self.frameLine(frame: frame, x: ref.x, y: ref.y, size: located.size, pitch: located.pitch).gold
+            let available = gold >= 0.9 ? true : (gold <= 0.85 ? false : (located.ready[ref.slot] ?? false))
             result[ref.slot] = available
-            parts.append("\(ref.slot) \(available ? "✓" : "✗") \(String(format: "%.2f", line.gold))")
+            readings.append(HudReading(slot: ref.slot, ready: available, gold: gold))
         }
         let now = nowMs()
         var lost = false
         if now - lastCheckMs > 5000 {
             lastCheckMs = now
-            let bestMatch = known.map { Self.ncc(Self.resample(frame: frame, x: $0.x, y: $0.y, width: size, height: size, toWidth: size, toHeight: size), $0.gray) }.max() ?? 0
+            let size = located.size
+            let bestMatch = located.refs.map { Self.ncc(Self.resample(frame: frame, x: $0.x, y: $0.y, width: size, height: size, toWidth: size, toHeight: size), $0.gray) }.max() ?? 0
             if bestMatch < 0.3 { checkFailures += 1 } else { checkFailures = 0 }
             lost = checkFailures >= 6
         }
         lock.withLock {
             ready = result
-            statusStorage = "HUD: " + parts.joined(separator: "  ")
+            state.readings = readings
             if lost {
                 refs = []
                 checkFailures = 0
-                statusStorage = "HUD: icons lost, locating again"
+                state = HudStatus(message: "HUD: icons lost, locating again")
             }
         }
         return result
@@ -104,13 +124,14 @@ final class AbilityHud: @unchecked Sendable {
                     self.everLocated = true
                     self.refs = found.refs
                     self.size = found.size
+                    self.pitch = found.pitch
                     self.champion = current
                     self.frameSize = (frame.width, fullHeight)
                     self.ready = [:]
-                    self.statusStorage = "HUD: ikony nalezeny (\(found.size) px, shoda \(String(format: "%.2f", found.score)))"
+                    self.state = HudStatus(message: "HUD: icons located (\(found.size) px, match \(String(format: "%.2f", found.score)))")
                     Log.info("HUD icons located: size \(found.size) px, pitch \(found.pitch) px, match \(String(format: "%.2f", found.score)), rects \(found.refs.map { "\($0.slot)(\($0.x),\($0.y))" }.joined(separator: " "))")
                 } else {
-                    self.statusStorage = "HUD: icons not found, retrying"
+                    self.state = HudStatus(message: "HUD: icons not found, retrying")
                 }
             }
         }
@@ -123,43 +144,40 @@ final class AbilityHud: @unchecked Sendable {
         deinit { pointer.deallocate() }
     }
 
+    /** Coarse search of every icon over the middle of the strip at 1/6 scale, fine search around each anchor at full scale, then the pitch that fits all four icons best. */
     private static func locate(strip: Frame, stripY: Int, fullHeight: Int, icons: [String: String]) -> (refs: [IconRef], size: Int, pitch: Int, score: Float)? {
-        guard let q = loadIcon(icons["Q"] ?? ""), let w = loadIcon(icons["W"] ?? ""), let e = loadIcon(icons["E"] ?? ""), let r = loadIcon(icons["R"] ?? "") else { return nil }
-        let arts = [q, w, e, r]
+        var arts: [Frame] = []
+        defer { for art in arts { UnsafeMutableRawPointer(mutating: art.base).deallocate() } }
+        for slot in ["Q", "W", "E", "R"] {
+            guard let art = loadIcon(icons[slot] ?? "") else { return nil }
+            arts.append(art)
+        }
         let k = 6
         let x0 = strip.width / 4
         let coarse = resample(frame: strip, x: x0, y: 0, width: strip.width / 2, height: strip.height, toWidth: strip.width / 2 / k, toHeight: strip.height / k)
-        var anchors = [(score: Float, x: Int, y: Int, size: Int)](repeating: (-1, 0, 0, 0), count: 4)
+        var anchors = [Anchor](repeating: Anchor(score: -1, x: 0, y: 0, size: 0), count: 4)
         var candidate = Int(Double(fullHeight) * 0.022)
+        var searched = 0
         while candidate <= Int(Double(fullHeight) * 0.064) {
-            let ts = max(8, candidate / k)
-            for slot in 0..<4 {
-                let template = resample(icon: arts[slot], to: ts)
-                for y in 0..<max(0, coarse.height - ts) {
-                    for x in 0..<max(0, coarse.width - ts) {
-                        let score = ncc(coarse, template, atX: x, atY: y)
-                        if score > anchors[slot].score { anchors[slot] = (score, x, y, candidate) }
-                    }
-                }
+            let templateSize = max(8, candidate / k)
+            if templateSize != searched {
+                searched = templateSize
+                searchCoarse(coarse, templates: arts.map { resample(icon: $0, to: templateSize) }, candidate: candidate, anchors: &anchors)
             }
             candidate += max(2, fullHeight / 900)
         }
+        let plane = GrayPlane(strip)
         var best: (total: Float, single: Float, x: Int, y: Int, size: Int, pitch: Int) = (-1, 0, 0, 0, 0, 0)
         for (slot, anchor) in anchors.enumerated() where anchor.score >= 0.5 {
             let ax = x0 + anchor.x * k, ay = anchor.y * k
-            var fine: (score: Float, x: Int, y: Int, size: Int) = (-1, 0, 0, 0)
+            var fine = Anchor(score: -1, x: 0, y: 0, size: 0)
             for size in (anchor.size - 6)...(anchor.size + 6) where size >= 12 {
-                let template = resample(icon: arts[slot], to: size)
-                for y in max(0, ay - 8)...(ay + 8) {
-                    for x in max(0, ax - 8)...(ax + 8) where x + size < strip.width && y + size < strip.height {
-                        let score = ncc(resample(frame: strip, x: x, y: y, width: size, height: size, toWidth: size, toHeight: size), template, atX: 0, atY: 0)
-                        if score > fine.score { fine = (score, x, y, size) }
-                    }
-                }
+                plane.search(template: resample(icon: arts[slot], to: size), xs: max(0, ax - 8)...(ax + 8), ys: max(0, ay - 8)...(ay + 8), best: &fine)
             }
             guard fine.score >= 0.6 else { continue }
             let size = fine.size
             let templates = arts.map { resample(icon: $0, to: size) }
+            let sums = templates.map(templateSums)
             for pitch in (size * 115 / 100)...(size * 135 / 100) {
                 let start = fine.x - slot * pitch
                 guard start >= 0, start + 3 * pitch + size < strip.width else { continue }
@@ -167,7 +185,7 @@ final class AbilityHud: @unchecked Sendable {
                     var total: Float = 0
                     var single: Float = 0
                     for i in 0..<4 {
-                        let score = ncc(resample(frame: strip, x: start + i * pitch, y: y, width: size, height: size, toWidth: size, toHeight: size), templates[i], atX: 0, atY: 0)
+                        let score = plane.ncc(x: start + i * pitch, y: y, template: templates[i], sums: sums[i])
                         total += score
                         if score > single { single = score }
                     }
@@ -184,8 +202,157 @@ final class AbilityHud: @unchecked Sendable {
         return (refs, best.size, best.pitch, best.total / 4)
     }
 
-    /** The icon's frame line right of the inner rect, searched within −10…+14 px so the locate's pitch error does not matter; only the vertical border is read, because the line under the icon is gold even on an ability that cannot be cast (Ashe's Focus gauge). */
-    private static func frameLine(frame: Frame, x: Int, y: Int, size: Int) -> (frame: Float, gold: Float) {
+    /** Best match so far of one icon: score, top-left and the icon size in frame px. */
+    private struct Anchor {
+        var score: Float
+        var x: Int
+        var y: Int
+        var size: Int
+    }
+
+    /** Scores the four templates at every coarse offset, eight neighbouring offsets per pass with the window sums shared; each lane adds in `ncc`'s order, so the scores match it bit for bit. */
+    private static func searchCoarse(_ image: Patch, templates: [Patch], candidate: Int, anchors: inout [Anchor]) {
+        let side = templates[0].width
+        let columns = max(0, image.width - side), rows = max(0, image.height - side)
+        guard columns > 0, rows > 0 else { return }
+        let n = Float(side * side)
+        let sums = templates.map(templateSums)
+        let values = image.values + [Float](repeating: 0, count: 8)
+        let weights = templates.flatMap(\.values)
+        let plane = side * side
+        values.withUnsafeBufferPointer { pixels in
+            weights.withUnsafeBufferPointer { weight in
+                let base = UnsafeRawPointer(pixels.baseAddress!)
+                for y in 0..<rows {
+                    var x = 0
+                    while x < columns {
+                        var sa = SIMD8<Float>(), saa = SIMD8<Float>()
+                        var sab0 = SIMD8<Float>(), sab1 = SIMD8<Float>(), sab2 = SIMD8<Float>(), sab3 = SIMD8<Float>()
+                        for r in 0..<side {
+                            let row = ((y + r) * image.width + x) * MemoryLayout<Float>.stride
+                            let t = r * side
+                            for c in 0..<side {
+                                let a = base.loadUnaligned(fromByteOffset: row + c * MemoryLayout<Float>.stride, as: SIMD8<Float>.self)
+                                sa += a
+                                saa += a * a
+                                sab0 += a * weight[t + c]
+                                sab1 += a * weight[plane + t + c]
+                                sab2 += a * weight[2 * plane + t + c]
+                                sab3 += a * weight[3 * plane + t + c]
+                            }
+                        }
+                        let va = saa - sa * sa / n
+                        let lanes = min(8, columns - x)
+                        func keep(_ slot: Int, _ sab: SIMD8<Float>) {
+                            let cov = sab - sa * sums[slot].sb / n
+                            let vb = sums[slot].sbb - sums[slot].sb * sums[slot].sb / n
+                            for lane in 0..<lanes {
+                                let score = va[lane] > 1 && vb > 1 ? cov[lane] / (va[lane] * vb).squareRoot() : 0
+                                if score > anchors[slot].score { anchors[slot] = Anchor(score: score, x: x + lane, y: y, size: candidate) }
+                            }
+                        }
+                        keep(0, sab0)
+                        keep(1, sab1)
+                        keep(2, sab2)
+                        keep(3, sab3)
+                        x += 8
+                    }
+                }
+            }
+        }
+    }
+
+    /** Template sums for `ncc`, accumulated in its order. */
+    private static func templateSums(_ template: Patch) -> (sb: Float, sbb: Float) {
+        var sb: Float = 0, sbb: Float = 0
+        for b in template.values {
+            sb += b
+            sbb += b * b
+        }
+        return (sb, sbb)
+    }
+
+    /** Full-resolution grayscale of the strip (the values a 1:1 `resample` yields) with spare zeros after the last row for eight-lane loads. */
+    private struct GrayPlane {
+        let width: Int
+        let height: Int
+        let values: [Float]
+
+        init(_ frame: Frame) {
+            width = frame.width
+            height = frame.height
+            var values = [Float](repeating: 0, count: frame.width * frame.height + 64)
+            values.withUnsafeMutableBufferPointer { plane in
+                for y in 0..<frame.height {
+                    let row = frame.base + y * frame.bytesPerRow
+                    for x in 0..<frame.width {
+                        let p = row.load(fromByteOffset: x * 4, as: UInt32.self)
+                        plane[y * frame.width + x] = Float((Int((p >> 16) & 0xFF) * 299 + Int((p >> 8) & 0xFF) * 587 + Int(p & 0xFF) * 114) / 1000)
+                    }
+                }
+            }
+            self.values = values
+        }
+
+        /** `ncc` of the template against the plane at one offset. */
+        func ncc(x: Int, y: Int, template: Patch, sums: (sb: Float, sbb: Float)) -> Float {
+            var sa: Float = 0, saa: Float = 0, sab: Float = 0
+            values.withUnsafeBufferPointer { plane in
+                template.values.withUnsafeBufferPointer { weight in
+                    for r in 0..<template.height {
+                        let row = (y + r) * width + x, t = r * template.width
+                        for c in 0..<template.width {
+                            let a = plane[row + c], b = weight[t + c]
+                            sa += a
+                            saa += a * a
+                            sab += a * b
+                        }
+                    }
+                }
+            }
+            let n = Float(template.width * template.height)
+            let cov = sab - sa * sums.sb / n, va = saa - sa * sa / n, vb = sums.sbb - sums.sb * sums.sb / n
+            return va > 1 && vb > 1 ? cov / (va * vb).squareRoot() : 0
+        }
+
+        /** Scores the template at every offset in the ranges that fits the plane, row by row and eight columns per pass, keeping the first best in scan order. */
+        func search(template: Patch, xs: ClosedRange<Int>, ys: ClosedRange<Int>, best: inout Anchor) {
+            let side = template.width
+            let n = Float(side * side)
+            let sums = AbilityHud.templateSums(template)
+            let vb = sums.sbb - sums.sb * sums.sb / n
+            values.withUnsafeBufferPointer { pixels in
+                template.values.withUnsafeBufferPointer { weight in
+                    let base = UnsafeRawPointer(pixels.baseAddress!)
+                    for y in ys where y + side < height {
+                        var x = xs.lowerBound
+                        while x <= xs.upperBound {
+                            var sa = SIMD8<Float>(), saa = SIMD8<Float>(), sab = SIMD8<Float>()
+                            for r in 0..<side {
+                                let row = ((y + r) * width + x) * MemoryLayout<Float>.stride
+                                let t = r * side
+                                for c in 0..<side {
+                                    let a = base.loadUnaligned(fromByteOffset: row + c * MemoryLayout<Float>.stride, as: SIMD8<Float>.self)
+                                    sa += a
+                                    saa += a * a
+                                    sab += a * weight[t + c]
+                                }
+                            }
+                            let cov = sab - sa * sums.sb / n, va = saa - sa * sa / n
+                            for lane in 0..<8 where x + lane <= xs.upperBound && x + lane + side < width {
+                                let score = va[lane] > 1 && vb > 1 ? cov[lane] / (va[lane] * vb).squareRoot() : 0
+                                if score > best.score { best = Anchor(score: score, x: x + lane, y: y, size: side) }
+                            }
+                            x += 8
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** The icon's frame line right of the inner rect, searched from −10 px to at most half the gap to the next icon (never past +14) so the locate's pitch error does not matter without ever reading the neighbour's border; only the vertical border is read, because the line under the icon is gold even on an ability that cannot be cast (Ashe's Focus gauge). */
+    private static func frameLine(frame: Frame, x: Int, y: Int, size: Int, pitch: Int) -> (frame: Float, gold: Float) {
         let inset = max(6, size / 8)
         @inline(__always) func classify(_ px: Int, _ py: Int) -> (gold: Bool, grey: Bool) {
             guard px >= 0, py >= 0, px < frame.width, py < frame.height else { return (false, false) }
@@ -198,7 +365,8 @@ final class AbilityHud: @unchecked Sendable {
         }
         let length = Float(max(1, size - 2 * inset))
         var best: (frame: Float, gold: Float) = (0, 0)
-        for offset in -10...14 {
+        let reach = min(14, max(0, (pitch - size) / 2))
+        for offset in -10...reach {
             var gold = 0, framed = 0
             for t in inset..<(size - inset) {
                 let border = classify(x + size - 1 + offset, y + t)

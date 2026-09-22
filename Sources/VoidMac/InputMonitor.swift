@@ -11,7 +11,7 @@ final class InputMonitor: @unchecked Sendable {
     private var lastVerifyMs: [UInt16: Double] = [:]
     private var tap: CFMachPort?
     private var lastTapWarningMs = -1e9
-    private(set) var available = false
+    private var tapActive = false
     /** Returns true to swallow a physical key event (key code, is key down, is autorepeat); called on the tap thread. */
     nonisolated(unsafe) var interceptor: ((UInt16, Bool, Bool) -> Bool)?
     /** Every physical, non-repeat key press, swallowed or not; called on the tap thread, must return fast. */
@@ -26,7 +26,7 @@ final class InputMonitor: @unchecked Sendable {
 
     /** True while the key is physically held; the HID key state is consulted at most every 100 ms to recover from a missed event. */
     func isHeld(_ code: UInt16) -> Bool {
-        guard available else { return CGEventSource.keyState(.hidSystemState, key: CGKeyCode(code)) }
+        guard lock.withLock({ tapActive }) else { return CGEventSource.keyState(.hidSystemState, key: CGKeyCode(code)) }
         let now = nowMs()
         return lock.withLock {
             let tapDown = down.contains(code)
@@ -62,7 +62,7 @@ final class InputMonitor: @unchecked Sendable {
         self.tap = tap
         CFRunLoopAddSource(CFRunLoopGetCurrent(), CFMachPortCreateRunLoopSource(nil, tap, 0), .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-        available = true
+        lock.withLock { tapActive = true }
         Log.info("key tap active")
         CFRunLoopRun()
     }

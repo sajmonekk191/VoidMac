@@ -23,30 +23,27 @@ final class GameSession: @unchecked Sendable {
     private var lastDiagnostic = ""
     private var lastDiagnosticAt = 0.0
     private let focusLock = NSLock()
-    private var focusValue = false
-    private var focusAtMs = -1e9
+    private var frontmost: (bundleID: String?, pid: pid_t)
     /** Whether a match is running; outside one the capture drops to 12 fps (the orbwalker sets the rate inside a match). */
     var isMatchActive: () -> Bool = { true }
 
+    /** Call on the main thread: the frontmost app is tracked from the workspace's activation notifications, never polled. */
     init(settings: Settings) {
         self.settings = settings
+        let front = NSWorkspace.shared.frontmostApplication
+        frontmost = (front?.bundleIdentifier, front?.processIdentifier ?? 0)
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            self?.focusLock.withLock { self?.frontmost = (app.bundleIdentifier, app.processIdentifier) }
+        }
     }
 
     var gameBundleID: String { settings.engine.gameBundleID }
 
-    /** Game (or this app over a captured game) in front; the workspace query is cached for 50 ms. */
+    /** Game (or this app over a captured game) in front. */
     var isFocused: Bool {
-        let now = nowMs()
-        if let cached = focusLock.withLock({ now - focusAtMs < 50 ? focusValue : nil }) { return cached }
-        var value = false
-        if let front = NSWorkspace.shared.frontmostApplication {
-            value = front.bundleIdentifier == gameBundleID || (front.processIdentifier == getpid() && capture.isRunning && capture.hasFrame)
-        }
-        focusLock.withLock {
-            focusValue = value
-            focusAtMs = now
-        }
-        return value
+        let front = focusLock.withLock { frontmost }
+        return front.bundleID == gameBundleID || (front.pid == getpid() && capture.isRunning && capture.hasFrame)
     }
 
     func start() {
@@ -65,7 +62,7 @@ final class GameSession: @unchecked Sendable {
                 if let window = pickGameWindow(from: listing.windows) {
                     missedWindow = 0
                     let engine = settings.engine
-                    let requested: CaptureMode = engine.captureMode == "display" ? .display : .window
+                    let requested = engine.captureMode
                     let mode: CaptureMode = (requested == .window && fallbackToDisplay) ? .display : requested
                     let center = CGPoint(x: window.frame.midX, y: window.frame.midY)
                     let display = listing.displays.first { $0.frame.contains(center) } ?? listing.displays.first

@@ -1,14 +1,22 @@
 import Foundation
 
+/** How a combo step is aimed: at the attacked target through the autoaim, toward the cursor (dashes), or not at all (self-casts). */
+enum ComboAim: String, SettingChoice {
+    case target, cursor
+    case untargeted = "self"
+
+    static let fallback = ComboAim.untargeted
+}
+
 /** One ability in a champion combo: cast at the target, in the cursor's direction (dashes), or without aiming (self-casts). */
 struct ComboStep: Codable, Equatable, Identifiable {
     var slot: String
     var enabled = true
-    var aim = "target"
+    var aim = ComboAim.target
 
     var id: String { slot }
 
-    init(slot: String, enabled: Bool = true, aim: String = "target") {
+    init(slot: String, enabled: Bool = true, aim: ComboAim = .target) {
         self.slot = slot
         self.enabled = enabled
         self.aim = aim
@@ -18,7 +26,7 @@ struct ComboStep: Codable, Equatable, Identifiable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         slot = try c.decodeIfPresent(String.self, forKey: .slot) ?? "Q"
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
-        aim = try c.decodeIfPresent(String.self, forKey: .aim) ?? "target"
+        aim = try c.decodeIfPresent(ComboAim.self, forKey: .aim) ?? .target
     }
 }
 
@@ -51,14 +59,16 @@ struct ComboSettings: Codable, Equatable {
 /** Built-in combos keyed by normalized champion name; other champions get their spells listed with every step off. */
 enum ChampionCombos {
     static let defaults: [String: ChampionCombo] = [
-        "lucian": ChampionCombo(steps: [ComboStep(slot: "Q"), ComboStep(slot: "W"), ComboStep(slot: "E", aim: "cursor"), ComboStep(slot: "R", enabled: false)]),
+        "lucian": ChampionCombo(steps: [ComboStep(slot: "Q"), ComboStep(slot: "W"), ComboStep(slot: "E", aim: .cursor), ComboStep(slot: "R", enabled: false)]),
+        "vayne": ChampionCombo(steps: [ComboStep(slot: "Q", aim: .untargeted), ComboStep(slot: "W", enabled: false, aim: .untargeted), ComboStep(slot: "E", enabled: false, aim: .untargeted), ComboStep(slot: "R", enabled: false, aim: .untargeted)]),
+        "kayle": ChampionCombo(steps: [ComboStep(slot: "E", aim: .untargeted), ComboStep(slot: "Q", enabled: false), ComboStep(slot: "W", enabled: false), ComboStep(slot: "R", enabled: false, aim: .untargeted)]),
     ]
 
     static func combo(for champion: String) -> ChampionCombo {
         if let known = defaults[Settings.normalize(champion)] { return known }
         let steps = ["Q", "W", "E", "R"].map { slot -> ComboStep in
             let targeting = Spells.spec(champion: champion, slot: slot)?.targetingType ?? .unknown
-            return ComboStep(slot: slot, enabled: false, aim: targeting == .none ? "self" : "target")
+            return ComboStep(slot: slot, enabled: false, aim: targeting == .none ? .untargeted : .target)
         }
         return ChampionCombo(steps: steps)
     }
@@ -116,13 +126,15 @@ final class ComboEngine: @unchecked Sendable {
         lock.withLock { castAtMs[slot].map { nowMs() - $0 } }
     }
 
-    /** How long the champion is locked after the key press: the HUD flip minus its ~100 ms input and display lag, but only while the last four flips agree within 120 ms; a cast lock is a fixed property of the spell, so a scattered reading (an icon that darkens when a charge is spent, not when the cast ends) is thrown away and the data table is used. */
+    /** How long the champion is locked after the key press: the HUD flip minus its ~100 ms input and display lag, taken from the flips nearest the median so one late reading cannot poison it; a cast lock is a fixed property of the spell, so a scattered reading (an icon that darkens when a charge is spent, not when the cast ends) is thrown away and the data table is used. */
     func castLockMs(slot: String, spec: SpellSpec?) -> Double {
         let data = (spec?.castLock ?? 0.25) * 1000
         let steady: Double? = lock.withLock {
-            let recent = (observedSamples[slot] ?? []).suffix(4).sorted()
-            guard recent.count == 4, let lowest = recent.first, let highest = recent.last, highest - lowest <= 120 else { return nil }
-            return recent[2]
+            let all = (observedSamples[slot] ?? []).sorted()
+            guard all.count >= 4 else { return nil }
+            let near = all.filter { abs($0 - all[all.count / 2]) <= 120 }
+            guard near.count >= 4 else { return nil }
+            return near[near.count / 2]
         }
         guard let steady else { return data }
         return min(max(60, steady - 100), data + 400)

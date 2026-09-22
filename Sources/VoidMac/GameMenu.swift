@@ -300,9 +300,9 @@ struct MSlider: View {
     }
 }
 
-struct MPicker: View {
-    @Binding var selection: String
-    let options: [(String, String)]
+struct MPicker<Value: Hashable>: View {
+    @Binding var selection: Value
+    let options: [(Value, String)]
 
     var body: some View {
         Picker("", selection: $selection) {
@@ -346,14 +346,14 @@ struct OrbwalkerRows: View {
         Group {
             MRow(label: "Activation key", hint: "Hold in game to orbwalk") { KeyBindButton(keyCode: $settings.activationKeyCode, compact: true) }
             MRow(label: "Attack", hint: "Click = the cursor jumps to the target and back; Attack Move = the attack-move key plus a click at the cursor") {
-                MPicker(selection: $settings.attackMode, options: [("click", "Click on target"), ("attackmove", "Attack Move")])
+                MPicker(selection: $settings.attackMode, options: [(AttackMode.click, "Click on target"), (.attackMove, "Attack Move")])
             }
-            if settings.attackMode == "attackmove" {
+            if settings.attackMode == .attackMove {
                 MRow(label: "Attack-move key") { KeyBindButton(keyCode: $settings.attackMoveKeyCode, compact: true) }
                 MRow(label: "Left-click after the key", hint: "For the default LoL bind A (waits for a click)") { MToggle(isOn: $settings.attackMoveClick) }
             }
             MRow(label: "Target", hint: "Which enemy in reach is attacked") {
-                MPicker(selection: $settings.targetMode, options: [("center", "Nearest to me"), ("lowest", "Lowest HP"), ("cursor", "Near cursor")])
+                MPicker(selection: $settings.targetMode, options: [(TargetMode.center, "Nearest to me"), (.lowest, "Lowest HP"), (.cursor, "Near cursor")])
             }
             MRow(label: "Sticky target", hint: "Keeps the last target while it stays in reach") { MToggle(isOn: $settings.stickyTarget) }
             MRow(label: "Only targets in reach", hint: "A click on an enemy out of reach would be a walk toward it") { MToggle(isOn: $settings.attackOnlyInRange) }
@@ -376,7 +376,7 @@ struct OrbwalkerRows: View {
             MRow(label: "Extra windup", hint: "Margin after the windup before moving") { MSlider(value: intBinding($settings.extraWindupMs), range: 0...200, step: 5, unit: " ms") }
             MRow(label: "Click humanisation", hint: "Random px around the click point") { MSlider(value: $settings.clickJitter, range: 0...10, unit: " px") }
             MRow(label: "AA reset after abilities", hint: "Abilities that reset the attack timer let the next attack go at once") { MToggle(isOn: $settings.attackResets) }
-            MRow(label: "Flee key", hint: "Hold = move only, no attacks") { KeyBindButton(keyCode: $settings.fleeKeyCode, clearable: true, compact: true) }
+            MRow(label: "Waveclear key", hint: "Hold = kite as usual but every attack is an attack-move at the cursor, so the game hits the nearest unit (clears minions); no combos") { KeyBindButton(keyCode: $settings.waveclearKeyCode, clearable: true, compact: true) }
         }
     }
 }
@@ -388,9 +388,9 @@ struct AutoaimRows: View {
     var body: some View {
         Group {
             MRow(label: "Autoaim", hint: "Q/W/E/R are held back, the cursor moves onto the enemy, then the key is sent") { MToggle(isOn: $settings.aim.enabled) }
-            MRow(label: "Cast mode") { MPicker(selection: $settings.aim.castMode, options: [("quick", "Quick cast"), ("normal", "Key + click")]) }
-            MRow(label: "Target") { MPicker(selection: $settings.aim.targetMode, options: [("cursor", "Near cursor"), ("nearest", "Nearest"), ("lowest", "Lowest HP")]) }
-            if settings.aim.targetMode == "cursor" {
+            MRow(label: "Cast mode") { MPicker(selection: $settings.aim.castMode, options: [(CastMode.quick, "Quick cast"), (.normal, "Key + click")]) }
+            MRow(label: "Target") { MPicker(selection: $settings.aim.targetMode, options: [(AimTargetMode.cursor, "Near cursor"), (.nearest, "Nearest"), (.lowest, "Lowest HP")]) }
+            if settings.aim.targetMode == .cursor {
                 MRow(label: "Cursor radius", hint: "px at 1920×1080 around the cursor") { MSlider(value: $settings.aim.cursorRadius, range: 100...900, step: 10, unit: " px") }
             }
             MRow(label: "Prediction", hint: "Leads skillshots by the target's world velocity × flight time") { MToggle(isOn: $settings.aim.prediction) }
@@ -469,8 +469,8 @@ struct ComboRows: View {
         let spec = Spells.resolve(abilityID: state.snapshot.abilities[step.slot]?.id ?? "", champion: championName, slot: step.slot)
         let targeting = settings.engine.aimTargeting(for: spec) ?? .unknown
         let aimable = targeting.aimable || targeting == .vector
-        var options: [(String, String)] = [("cursor", "Cursor"), ("self", "No aim")]
-        if aimable { options.insert(("target", "At target"), at: 0) }
+        var options: [(ComboAim, String)] = [(.cursor, "Cursor"), (.untargeted, "No aim")]
+        if aimable { options.insert((.target, "At target"), at: 0) }
         return HStack(spacing: 6) {
             Text("\(index + 1)").font(.system(size: 10, weight: .bold, design: .rounded)).foregroundStyle(.secondary).frame(width: 12)
             Text(step.slot).font(.system(size: 11, weight: .heavy, design: .rounded)).frame(width: 16)
@@ -536,7 +536,7 @@ struct DetectionRows: View {
             MRow(label: "Capture fps", hint: "Capture cap during a match") {
                 MPicker(selection: Binding(get: { String(settings.captureFps) }, set: { settings.captureFps = Int($0) ?? 120 }), options: ["24", "30", "48", "60", "80", "120"].map { ($0, $0) })
             }
-            MRow(label: "Capture mode") { MPicker(selection: $settings.captureMode, options: [("window", "Automatic"), ("display", "Display")]) }
+            MRow(label: "Capture mode") { MPicker(selection: $settings.captureMode, options: [(CaptureMode.window, "Automatic"), (.display, "Display")]) }
             MInfo(label: "Capture", value: state.capturing ? "\(Int(state.pixelSize.width))×\(Int(state.pixelSize.height)) @ \(Int(state.fps)) fps" : "no window", color: state.capturing ? Theme.ok : Theme.danger)
             MInfo(label: "Scan", value: state.scanMicros > 0 ? "\(Int(state.scanMicros)) µs" : "–")
         }

@@ -124,6 +124,46 @@ for expectation in expectations {
     print("  \(shown.joined(separator: " "))  \(expectation.file) — \(expectation.note)")
 }
 
+print("asserting the reader never borrows the neighbour's gold border (Kayle, 3600x2144, icon gap 17 px)")
+let kayleIcons = ["Q": "KayleQ.png", "W": "KayleW.png", "E": "KayleE.png", "R": "KayleR.png"]
+let kayleAnchor = "hud-suspect-2026-09-22T10-47-18Z-E.png"
+let kayleExpectations: [(file: String, note: String, ready: [String: Bool])] = [
+    (kayleAnchor, "E on cooldown (6 s), Q/W/R castable; a +14 px window reached R's gold border and read E as castable", ["Q": true, "W": true, "E": false, "R": true]),
+    ("hud-suspect-2026-09-22T10-46-18Z-E.png", "E on cooldown (7 s), Q/W/R castable; same misread one second earlier", ["Q": true, "W": true, "E": false, "R": true]),
+]
+let kayle = AbilityHud()
+if let kayleFrame = load(fixture(kayleAnchor)) {
+    _ = kayle.read(frame: kayleFrame, champion: "Kayle", icons: kayleIcons, slots: slots)
+    for _ in 0..<100 where kayle.statusText.contains("not located") || kayle.statusText.contains("not found") {
+        usleep(100_000)
+        Clock.ms += 2000
+        _ = kayle.read(frame: kayleFrame, champion: "Kayle", icons: kayleIcons, slots: slots)
+    }
+    if kayle.statusText.contains("not located") || kayle.statusText.contains("not found") {
+        failures.append("Kayle: the icons never located on \(kayleAnchor) (\(kayle.statusText))")
+    } else {
+        for expectation in kayleExpectations {
+            guard let frame = load(fixture(expectation.file)) else {
+                failures.append("\(expectation.file): cannot be read")
+                continue
+            }
+            Clock.ms += 6000
+            let got = kayle.read(frame: frame, champion: "Kayle", icons: kayleIcons, slots: slots)
+            var shown: [String] = []
+            for slot in slots {
+                let want = expectation.ready[slot]!
+                shown.append("\(slot) \(got[slot] == nil ? "?" : (got[slot]! ? "✓" : "✗"))")
+                if got[slot] != want {
+                    failures.append("\(expectation.file) \(slot): expected \(mark(want)), got \(mark(got[slot]))")
+                }
+            }
+            print("  \(shown.joined(separator: " "))  \(expectation.file) — \(expectation.note)")
+        }
+    }
+} else {
+    failures.append("cannot read the Kayle anchor fixture")
+}
+
 print("asserting a border that is neither gold nor grey still produces a verdict")
 if let dark = load(fixture(anchorName)) {
     paintBlack(dark, slot: 1)

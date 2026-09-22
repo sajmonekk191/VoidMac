@@ -114,9 +114,9 @@ struct ComboTab: View {
             }
             Spacer(minLength: 8)
             Picker("", selection: Binding(get: { step.aim }, set: { value in update { $0.steps[index].aim = value } })) {
-                if aimable { Text("At target").tag("target") }
-                Text("Cursor direction").tag("cursor")
-                Text("No aiming").tag("self")
+                if aimable { Text("At target").tag(ComboAim.target) }
+                Text("Cursor direction").tag(ComboAim.cursor)
+                Text("No aiming").tag(ComboAim.untargeted)
             }
             .labelsHidden().frame(width: 150)
             Toggle("", isOn: Binding(get: { step.enabled }, set: { value in update { $0.steps[index].enabled = value } })).toggleStyle(.switch).labelsHidden()

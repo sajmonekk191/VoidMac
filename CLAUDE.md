@@ -10,9 +10,9 @@ anglicky; tento README je česky. Žádný zásah do paměti hry: jen snímání
 | Soubor | Účel |
 |---|---|
 | `FrameCapture`, `GameSession` | Stream okna hry (nativní rozlišení, 120 fps v zápase, 12 mimo něj), nový snímek probouzí čekající vlákna přes podmínkovou proměnnou |
-| `PixelSearch` | Jeden průchod snímkem (každý 9. řádek při 2x, 4. při 1x): červená výplň + obrys nad a pod ní + level box s číslicí, nebo samotný level box u prázdného baru, a zároveň vlastní zelený bar; šířka baru je pevná (100 px × výškové měřítko), výplň se měří uprostřed baru; ~0,4 ms na snímek 3600×2338 |
+| `PixelSearch` | Jeden průchod snímkem (každý 9. řádek při 2x, 4. při 1x): červená výplň + obrys nad a pod ní + level box s číslicí, nebo samotný level box u prázdného baru, a zároveň vlastní zelený bar; šířka baru je pevná (100 px × výškové měřítko), výplň se měří uprostřed baru; ~0,22 ms na snímek 3600×2338 (SIMD předfiltr po 16 pixelech, změřeno `Tools/vision-bench`) |
 | `Vision` | Skenuje každý snímek, vede tracky nepřátel (ID přežije 1,5 s bez detekce, počet spatření, rychlost regresí za 160 ms), poslední známý vlastní bar, pohyb terénu při držení aktivace nebo predikci (poslední pohyb, zamčená kamera); jediný zdroj cílů pro orbwalker i autoaim |
-| `Orbwalker` | Klik na cíl nebo attack-move, kiting podle oficiálních windupů, cíl = track viděný v aktuálním a aspoň jednom dřívějším snímku, útok jen v dosahu od vlastního baru, lepivý cíl podle identity tracku s hysterezí, hold zóna, reset autoútoku po abilitě, humanizace kliku, Flee, Show Range, Target Champions Only, vrtulník, emote po killu |
+| `Orbwalker` | Klik na cíl nebo attack-move, kiting podle oficiálních windupů, cíl = track viděný v aktuálním a aspoň jednom dřívějším snímku, útok jen v dosahu od vlastního baru, lepivý cíl podle identity tracku s hysterezí, hold zóna, reset autoútoku po abilitě, humanizace kliku, Waveclear, Show Range, Target Champions Only, vrtulník, emote po killu |
 | `Aim` | Autoaim: aktivní event tap zadrží Q/W/E/R (a D/F pro Ignite/Exhaust), kurzor na předpovězený cíl s důvěryhodností z linearity pohybu, vektorové spelly dvěma body, klávesa držená jako prst, návrat kurzoru |
 | `Combo`, `AbilityHud` | Komba: po potvrzeném autoútoku sešle další zapnutou schopnost v pořadí (na cíl přes autoaim, směrem kurzoru u dashů, bez míření); dostupnost čte z HUDu jen u zapnutých schopností (ikony Q/W/E/R najde jednou za hru šablonou z Data Dragonu — řádek ikon skládá z té čtveřice, která sedí nejlépe dohromady, takže ztmavené Q hledání neblokuje; znovu hledá jen po 30 s bez shody kterékoli ze čtyř ikon; každý snímek pak v okně −10…+14 px vpravo od ikony najde **svislou** linku rámečku a rozhodne podle podílu zlaté: od 0,90 seslatelná, do 0,85 ne, mezi tím platí předchozí stav. Spodní linka se nečte: je zlatá i u schopnosti, kterou seslat nejde — u Ashe je to ukazatel Focus stacků, a než se to zjistilo, hlásil reader Q jako připravené pořád), záložně odhad z vlastních castů, levelu a ability haste, mana z API; vestavěné kombo pro Luciana (Q, W, E směrem kurzoru, E resetuje AA); volba „Combo must not delay the attack“ sešle jen to, čemu se cast lock vejde do mezery mezi útoky (vypnutá smí cast posunout další útok až o 100 ms) |
 | `Input`, `InputMonitor` | Syntetický vstup na úrovni session (HID post umí pod zátěží uváznout 20 ms, session 2 ms); jediný aktivní tap jen pro klávesy, pohyb myši naším procesem nikdy neprochází |
@@ -52,7 +52,7 @@ některé oprávnění.
 
 | Záložka | Obsah |
 |---|---|
-| Orbwalker | Způsob útoku, výběr cíle, Show Range, Attack Champion Only (klávesa / prostřední tlačítko), chytré cílení (dosah, lepivý cíl, hold zóna, resety, humanizace, Flee), kiting (move-clicky, extra windup), klávesy |
+| Orbwalker | Způsob útoku, výběr cíle, Show Range, Attack Champion Only (klávesa / prostřední tlačítko), chytré cílení (dosah, lepivý cíl, hold zóna, resety, humanizace, Waveclear), kiting (move-clicky, extra windup), klávesy |
 | Autoaim | Zapnutí, quick cast / klávesa + klik, výběr cíle, predikce, kontrola dosahu, klávesy Q/W/E/R/D/F, časování, kalibrace z kruhu dosahu (stav: elipsa, nohy, poměr kruhu, px/jednotka, perspektiva) a záložní měřítko, spelly šampiona s ikonami a přepsáním typu |
 | Komba | Zapnutí, jedna schopnost na útok, pořadí a způsob míření každé schopnosti šampiona (ikony, cast, CD, cena), stav cooldownů a many |
 | Extra | Vrtulník (klávesa, rychlost, poloměr), emote po killu |
@@ -130,7 +130,7 @@ některé oprávnění.
 - **Dosah přes perspektivu**: kamera LoL míří 56,25° pod horizont, takže jednotka má nahoře na obrazovce ~0,72× a dole ~1,2× tolik
   pixelů co ve středu; `GroundProjection` (px/jednotka ve středu, perspektiva `c`, nohy) převádí body obrazovky na herní jednotky
   a zpět. Se zapnutým „Ukázat attack range“ hledá `Vision` každých 200 ms kruh dosahu (tyrkysovo-bílý pruh, 72 paprsků, RANSAC
-  osově souměrné elipsy, 1–2 ms) a z vodorovné poloosy spočítá px/jednotka a z posunu středu elipsy polohu nohou postavy
+  osově souměrné elipsy, ~0,15 ms bez alokací v cyklu) a z vodorovné poloosy spočítá px/jednotka a z posunu středu elipsy polohu nohou postavy
   (`RangeRing`; perspektiva je konstanta kamery svázaná s měřítkem, `c = kx·0,472/výška snímku`, řešení z tvaru elipsy bylo
   špatně podmíněné); poloměr v jednotkách je attack range + 65 (vlastní gameplay poloměr; ověřeno ve hře, cíl
   těsně za kruhem je ještě zasažitelný, protože stačí, aby se kruhu dotýkal jeho okraj). Kalibrace z rychlosti chůze byla
@@ -160,6 +160,15 @@ některé oprávnění.
   „jsem ve hře“ stav — panel pak hlásil „out of game“ a držel data posledního championa.
 - Každých 30 s útoku (a bez nepřítele nejvýš jednou za 5 min) uloží vlákno na pozadí snímek do `~/Library/Logs/VoidMac-frames/`
   (posledních 10) pro ladění detekce na reálných datech; horká vlákna nikdy nekódují PNG.
+- Log se zapisuje na utility frontě: realtime vlákna jen předají hotový řádek a na disk nikdy nečekají (před koncem
+  procesu se fronta dopíše). Proměnná `VOIDMAC_LOG` přesměruje soubor jinam (bench a testy tak neplní skutečný log).
+- Vyhledání ikon HUDu (hrubé hledání v 1/6, jemné kolem kotvy, rozteč) počítá korelaci po osmi pozicích najednou,
+  velikosti šablony se stejným zaokrouhlením přeskakuje (dávaly by stejná skóre) a sdílí součty okna mezi ikonami:
+  ~30 ms na výkonném jádře místo 6 s, výsledek bit po bitu stejný (ověřeno na 246 dvojicích snímek × sada ikon).
+- Nastavení je jedna hodnota `EngineSettings` (Codable): panel ji mění přes `Settings` (dynamic member lookup),
+  vlákna čtou snímek, který se obnoví synchronně při každé změně. Starší config se skládá přes výchozí hodnoty
+  (chybějící klíče a `null` = výchozí, rozbitá skupina `aim`/`combos`/`layout` padá na výchozí sama), neznámá
+  hodnota volby (`attackMode`, `targetMode`, …) se čte jako výchozí případ, zápis je atomický.
 - Vrtulník krouží v herních jednotkách kolem bodu 10 j pod nohama (kruh v pixelech obrazovky driftoval nahoru: jeho horní body jsou
   ve světě dál než dolní, postava k nim ušla víc).
 - Inspirace: LeagueSharp `Orbwalking.cs` (AttackResets, HoldZone, Flee), `Prediction.cs` (hitchance podle přímosti pohybu),
@@ -169,7 +178,7 @@ některé oprávnění.
 
 - **Rozbor logu jedním příkazem**: `Tools/analyze-log.py [log] [--last N]` vypíše po jednotlivých sezeních kadenci útoků
   (`late` medián a p90), druhy pomalých potvrzení, komba a jejich slack, velikosti poklesu pruhu podle hloubky kliku, pohyby
-  učení těla, změny identity tracku, minutí po šampionech, smity, zamítnutí kvůli dosahu a ztráty okna hry. Sezení **nikdy
+  učení těla, změny identity tracku, minutí po šampionech, zamítnutí kvůli dosahu a ztráty okna hry. Sezení **nikdy
   nemíchá**: časy se přes dny opakují a ID tracků se každým spuštěním resetují od jedničky, takže cokoli klíčovaného přes ID
   nebo čas je při slučování nesmysl.
 
@@ -187,6 +196,9 @@ $B --analyze a.png --hud Lucian   # offline: najde ikony Q/W/E/R v HUDu a vypí�
 $B --ui-shot složka               # offline: vyrenderuje menu ve hře, okénka a tlačítko do PNG (kontrola vzhledu bez hry)
 Tools/reset-permissions.sh         # smaže udělená oprávnění (Accessibility, Screen Recording, Input Monitoring)
 Tools/hud-regression-check/check.sh # přehraje označené snímky přes skutečné čtení HUDu a ověří verdikty (PASS/FAIL)
+swift test                          # jednotkové testy na syntetických snímcích (detekce, kruh, tok terénu, nastavení, časování)
+Tools/vision-bench/bench.sh --write g.txt  # časy všech detektorů na nahraných snímcích + uloží jejich výsledky
+Tools/vision-bench/bench.sh --check g.txt  # po změně: časy a FAIL, pokud se jakýkoli výsledek liší
 python3 Tools/generate_spells.py   # znovu vygeneruje SpellData.swift z aktuálního patche
 python3 Tools/generate_champions.py # znovu vygeneruje ChampionModelData.swift (výšky modelů a barů, výběrové válce)
 ```

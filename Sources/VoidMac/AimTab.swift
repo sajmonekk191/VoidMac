@@ -17,22 +17,22 @@ struct AimTab: View {
                 Text("Press Q/W/E/R: the program holds the key back, moves the cursor onto the enemy (for skillshots onto the predicted position), waits for two new game frames and sends the key. While you hold the key the cursor follows the target; after release and two more frames it returns to where your hand is. With no target in range the key passes to the game normally.")
                     .font(.system(size: 10.5)).foregroundStyle(.secondary)
                 SettingRow(label: "Autoaim enabled") { Toggle("", isOn: $settings.aim.enabled).toggleStyle(.switch).labelsHidden() }
-                SettingRow(label: "Cast mode", hint: settings.aim.castMode == "quick" ? "Quick cast (with indicator too): the spell fires on key press or release" : "Normal cast: the key, then a left click on the target") {
+                SettingRow(label: "Cast mode", hint: settings.aim.castMode == .quick ? "Quick cast (with indicator too): the spell fires on key press or release" : "Normal cast: the key, then a left click on the target") {
                     Picker("", selection: $settings.aim.castMode) {
-                        Text("Quick cast").tag("quick")
-                        Text("Key + click").tag("normal")
+                        Text("Quick cast").tag(CastMode.quick)
+                        Text("Key + click").tag(CastMode.normal)
                     }
                     .pickerStyle(.segmented).labelsHidden().frame(width: 220)
                 }
                 SettingRow(label: "Target selection", hint: targetHint) {
                     Picker("", selection: $settings.aim.targetMode) {
-                        Text("Near cursor").tag("cursor")
-                        Text("Nearest").tag("nearest")
-                        Text("Lowest HP").tag("lowest")
+                        Text("Near cursor").tag(AimTargetMode.cursor)
+                        Text("Nearest").tag(AimTargetMode.nearest)
+                        Text("Lowest HP").tag(AimTargetMode.lowest)
                     }
                     .pickerStyle(.segmented).labelsHidden().frame(width: 260)
                 }
-                if settings.aim.targetMode == "cursor" {
+                if settings.aim.targetMode == .cursor {
                     SettingRow(label: "Radius around the cursor", hint: "\(Int(settings.aim.cursorRadius)) px at 1920×1080; farther from the cursor the nearest enemy is taken") {
                         Slider(value: $settings.aim.cursorRadius, in: 100...900, step: 10).frame(width: 220)
                     }
@@ -106,9 +106,9 @@ struct AimTab: View {
 
     private var targetHint: String {
         switch settings.aim.targetMode {
-        case "nearest": return "Enemy nearest to you"
-        case "lowest": return "Enemy with the lowest HP share"
-        default: return "Enemy nearest the cursor, else nearest to you"
+        case .nearest: return "Enemy nearest to you"
+        case .lowest: return "Enemy with the lowest HP share"
+        case .cursor: return "Enemy nearest the cursor, else nearest to you"
         }
     }
 

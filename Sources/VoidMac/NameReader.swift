@@ -9,18 +9,16 @@ final class NameReader: @unchecked Sendable {
         var level: Int
         var text: String
         var atMs: Double
-        /** Bar fill (px) in the frame the read came from, so a health number can be scaled by later fills. */
-        var fill = 0
     }
 
-    /** One crop to read: the bar's track, the image and where the fill starts inside it (crop px). */
+    /** One crop to read: the bar's track, the image with the enlargement it still needs, and where the fill starts inside the enlarged image. */
     struct Job {
         let trackID: Int
         let image: CGImage
+        let scale: Int
         let fillX: Double
         let fillY: Double
         let atMs: Double
-        var fill = 0
     }
 
     private struct Attempt {
@@ -70,7 +68,7 @@ final class NameReader: @unchecked Sendable {
 
     private func read(_ job: Job) {
         defer { lock.withLock { busy = false } }
-        let lines = Self.recognize(job.image)
+        let lines = Self.recognize(FrameDump.enlarged(job.image, scale: job.scale))
         var name = ""
         var level = 0
         for line in lines {

@@ -46,8 +46,9 @@ The app lives in the menu bar (scope icon). Grant the three permissions when mac
 | **C** | Hold to show attack range (bound to the game's own range key) |
 | **'** | Attack champions only |
 | **3** | Emote after a kill |
+| **V** (hold) | Waveclear: kite as usual, but every attack is an attack-move, so the game hits the nearest unit |
 
-Flee and the helicopter are unbound by default. Every key is rebindable in the panel.
+The helicopter is unbound by default. Every key is rebindable in the panel.
 
 ## What it does
 
@@ -71,7 +72,7 @@ Flee and the helicopter are unbound by default. Every key is rebindable in the p
 | Layer | Detail |
 |---|---|
 | Capture | ScreenCaptureKit window stream at native resolution, 120 fps in a match, 12 fps outside; a new frame wakes the waiting threads through a condition variable |
-| Detection | One pass per frame (every 9th row at 2x): red fill + outline above and below + the level box; ~0.4 ms on a 3600×2338 frame |
+| Detection | One pass per frame (every 9th row at 2x): red fill + outline above and below + the level box; ~0.22 ms on a 3600×2338 frame, ~0.28 ms per frame for the whole vision step |
 | Timing | The orbwalker and vision threads run under a real-time (time-constraint) policy and wait on `mach_wait_until`; a background process otherwise gets its timers coalesced by up to 100 ms |
 | Game state | Attack speed, attack range, champion, death and summoner spells come from the Live Client API |
 | Data | 692 spells (targeting, range, speed, cast time, cooldown, cost) and 172 champion windups, generated from Data Dragon and CommunityDragon |
@@ -80,7 +81,8 @@ Flee and the helicopter are unbound by default. Every key is rebindable in the p
 
 ```
 Sources/VoidMac/      the app: capture, detection, orbwalker, autoaim, combos, UI
-Tools/                generators, log analysis, the HUD regression check, packaging
+Tests/VoidMacTests/   unit tests (`swift test`) on synthetic frames: detection, ring fit, ground flow, settings, timing
+Tools/                generators, log analysis, the HUD regression check, the vision benchmark, packaging
 media/                the gameplay loop and the UI screenshots used above
 CLAUDE.md             the full engineering write-up (in Czech): every subsystem and why it is built that way
 ```
@@ -91,8 +93,11 @@ Config lives in `~/Library/Application Support/VoidMac/config.json`, the log in 
 
 ```bash
 swift build -c release                        # build only
+swift test                                    # unit tests, no game needed
 Tools/analyze-log.py --last 3                 # per-session report: cadence, combos, misses, HUD state
 Tools/hud-regression-check/check.sh           # replays labelled frames through the real HUD reader
+Tools/vision-bench/bench.sh --write golden.txt   # time every detector on the recorded frames, keep their results
+Tools/vision-bench/bench.sh --check golden.txt   # after a change: same timings, and FAIL if any result differs
 .build/release/VoidMac --analyze frame.png --hud Ashe    # offline: locate the ability icons in a screenshot
 .build/release/VoidMac --ui-shot out/         # render the in-game UI to PNGs without a game
 python3 Tools/generate_spells.py              # regenerate the spell table for a new patch
@@ -100,6 +105,8 @@ python3 Tools/generate_spells.py              # regenerate the spell table for a
 
 The regression check is not optional: the HUD reader decides when a combo may cast, and two changes to it have
 already shipped broken. It replays frames with known answers through the real reader and fails on both of them.
+Performance work goes through the vision benchmark the same way: a speed-up counts only when `--check` still
+reports every scan, ring fit and ground-flow result identical to the golden file taken before the change.
 
 ## Limits
 

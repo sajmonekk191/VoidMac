@@ -1,6 +1,46 @@
 import Combine
 import Foundation
 
+/** A choice stored as its raw string; a string this build does not know (an older or hand-edited file) decodes to `fallback` instead of failing the whole file. */
+protocol SettingChoice: RawRepresentable, Codable, CaseIterable, Hashable where RawValue == String {
+    static var fallback: Self { get }
+}
+
+extension SettingChoice {
+    init(from decoder: Decoder) throws {
+        self = Self(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .fallback
+    }
+}
+
+/** How the orbwalker delivers an attack: the cursor jumps onto the target, or the attack-move key fires at the cursor. */
+enum AttackMode: String, SettingChoice {
+    case click
+    case attackMove = "attackmove"
+
+    static let fallback = AttackMode.click
+}
+
+/** Which enemy in reach the orbwalker attacks. */
+enum TargetMode: String, SettingChoice {
+    case center, lowest, cursor
+
+    static let fallback = TargetMode.center
+}
+
+/** Which enemy the autoaim picks. */
+enum AimTargetMode: String, SettingChoice {
+    case cursor, nearest, lowest
+
+    static let fallback = AimTargetMode.cursor
+}
+
+/** How a spell key reaches the game: quick cast, or the key and then a left click. */
+enum CastMode: String, SettingChoice {
+    case quick, normal
+
+    static let fallback = CastMode.quick
+}
+
 /** Per-spell autoaim override, stored only when the user changes something. */
 struct SpellOverride: Codable, Equatable {
     var enabled = true
@@ -77,8 +117,8 @@ struct AimSettings: Codable, Equatable {
     var slotD = true
     var slotF = true
     var vectorLength = 500.0
-    var castMode = "quick"
-    var targetMode = "cursor"
+    var castMode = CastMode.quick
+    var targetMode = AimTargetMode.cursor
     var cursorRadius = 350.0
     var prediction = true
     var predictionFactor = 1.0
@@ -96,10 +136,10 @@ struct AimSettings: Codable, Equatable {
     var overrides: [String: SpellOverride] = [:]
 }
 
-/** Immutable copy of everything the engine threads need, rebuilt on the main thread after each change. */
-struct EngineSettings {
+/** Every persisted setting as one value, the single source of truth: the UI edits it through `Settings`, engine threads read a snapshot of it. */
+struct EngineSettings: Codable, Equatable {
     var gameBundleID = "com.riotgames.LeagueofLegends.GameClient"
-    var captureMode = "window"
+    var captureMode = CaptureMode.window
     var capturePoints = false
     var captureFps = 120
     var clickOffsetX = 0.0
@@ -107,7 +147,7 @@ struct EngineSettings {
     var clickHeight = 55.0
     var identifyChampions = true
     var heightFactors: [String: Double] = [:]
-    var attackMode = "click"
+    var attackMode = AttackMode.click
     var attackMoveKeyCode: UInt16 = 0
     var attackMoveClick = true
     var clickHoldMs = 6
@@ -117,10 +157,13 @@ struct EngineSettings {
     var panelKeyCode: UInt16 = 54
     var showAttackRange = false
     var drawRange = true
+    var rangeColorHex = "#FF9926"
+    var rangeRainbow = false
+    var spellRanges = SpellRangeStyle.defaults
     var attackChampionOnly = false
     var championOnlyKeyCode: UInt16 = 39
     var championOnlyMiddleMouse = false
-    var targetMode = "center"
+    var targetMode = TargetMode.center
     var moveClickMinMs = 70
     var moveClickMaxMs = 100
     var defaultWindupPercent = 15.0
@@ -133,7 +176,7 @@ struct EngineSettings {
     var holdRadius = 60.0
     var attackResets = true
     var clickJitter = 3.0
-    var fleeKeyCode: UInt16 = KeyNames.none
+    var waveclearKeyCode: UInt16 = 9
     var helicopterKeyCode: UInt16 = KeyNames.none
     var helicopterIntervalMs = 60
     var helicopterRadius = 70.0
@@ -142,6 +185,8 @@ struct EngineSettings {
     var emoteCtrl = true
     var aim = AimSettings()
     var combos = ComboSettings()
+    var layout = LayoutSettings()
+    var lastChampion = ""
 
     /** The user's combo for a champion, else the built-in one. */
     func combo(for champion: String) -> ChampionCombo {
@@ -225,67 +270,33 @@ struct EngineSettings {
     }
 }
 
-final class Settings: ObservableObject, Codable, @unchecked Sendable {
-    @Published var gameBundleID = "com.riotgames.LeagueofLegends.GameClient"
-    @Published var captureMode = "window"
-    @Published var capturePoints = false
-    @Published var captureFps = 120
-    @Published var clickOffsetX = 0.0
-    @Published var clickOffsetY = 74.0
-    @Published var clickHeight = 55.0
-    @Published var identifyChampions = true
-    @Published var heightFactors: [String: Double] = [:]
-    @Published var attackMode = "click"
-    @Published var attackMoveKeyCode: UInt16 = 0
-    @Published var attackMoveClick = true
-    @Published var clickHoldMs = 6
-    @Published var clickSettleMs = 8
-    @Published var activationKeyCode: UInt16 = 49
-    @Published var attackRangeKeyCode: UInt16 = 8
-    @Published var panelKeyCode: UInt16 = 54
-    @Published var showAttackRange = false
-    @Published var drawRange = true
-    @Published var rangeColorHex = "#FF9926"
-    @Published var rangeRainbow = false
-    @Published var spellRanges = SpellRangeStyle.defaults
-    @Published var attackChampionOnly = false
-    @Published var championOnlyKeyCode: UInt16 = 39
-    @Published var championOnlyMiddleMouse = false
-    @Published var targetMode = "center"
-    @Published var moveClickMinMs = 70
-    @Published var moveClickMaxMs = 100
-    @Published var defaultWindupPercent = 15.0
-    @Published var extraWindupMs = 60
-    @Published var attackLatencyMs = 80
-    @Published var activationDelayMs = 150
-    @Published var attackOnlyInRange = true
-    @Published var attackRangeTolerance = 6.0
-    @Published var stickyTarget = true
-    @Published var holdRadius = 60.0
-    @Published var attackResets = true
-    @Published var clickJitter = 3.0
-    @Published var fleeKeyCode: UInt16 = KeyNames.none
-    @Published var helicopterKeyCode: UInt16 = KeyNames.none
-    @Published var helicopterIntervalMs = 60
-    @Published var helicopterRadius = 70.0
-    @Published var emoteOnKill = false
-    @Published var emoteKeyCode: UInt16 = 20
-    @Published var emoteCtrl = true
-    @Published var aim = AimSettings()
-    @Published var combos = ComboSettings()
-    @Published var layout = LayoutSettings()
-    @Published var lastChampion = ""
+/** The settings store: `settings.x` reads and writes `values.x`, engine threads read the `engine` snapshot, which every change refreshes synchronously. */
+@dynamicMemberLookup
+final class Settings: ObservableObject, @unchecked Sendable {
+    @Published var values: EngineSettings {
+        didSet { engineLock.withLock { engineSnapshot = values } }
+    }
 
     private let engineLock = NSLock()
-    private var engineSnapshot = EngineSettings()
+    private var engineSnapshot: EngineSettings
 
-    /** Thread-safe snapshot for engine threads; refreshed on the main thread after every change. */
+    init(values: EngineSettings = EngineSettings()) {
+        self.values = values
+        engineSnapshot = values
+    }
+
+    subscript<Value>(dynamicMember keyPath: WritableKeyPath<EngineSettings, Value>) -> Value {
+        get { values[keyPath: keyPath] }
+        set { values[keyPath: keyPath] = newValue }
+    }
+
+    /** Thread-safe snapshot for engine threads. */
     var engine: EngineSettings { engineLock.withLock { engineSnapshot } }
 
     /** Write-back of a champion's learned in-game height factor (main thread). */
     func learnHeight(champion: String, factor: Double) {
-        guard Settings.plausibleHeightFactor(factor, champion: champion), heightFactors[champion] != factor else { return }
-        heightFactors[champion] = factor
+        guard Settings.plausibleHeightFactor(factor, champion: champion), values.heightFactors[champion] != factor else { return }
+        values.heightFactors[champion] = factor
     }
 
     /** A learned body between 0.7 and 2.6 of the mesh in the size table; anything outside came from misses that had another cause and is thrown away. */
@@ -296,130 +307,19 @@ final class Settings: ObservableObject, Codable, @unchecked Sendable {
     /** Write-back of what the range ring measured, so the next game starts calibrated (main thread). */
     func learnCalibration(kxRef: Double, barToFeetRef: Double, feetFromCentreYRef: Double) {
         guard kxRef > 0.3, kxRef < 1.3 else { return }
-        let kx = (kxRef * 1000).rounded() / 1000
-        let feet = max(40, min(200, barToFeetRef.rounded()))
-        let centreY = feetFromCentreYRef.rounded()
-        guard kx != aim.pxPerUnitX || feet != aim.selfFeetOffsetY || centreY != aim.feetFromCentreY else { return }
-        aim.pxPerUnitX = kx
-        aim.selfFeetOffsetY = feet
-        aim.feetFromCentreY = centreY
+        var aim = values.aim
+        aim.pxPerUnitX = (kxRef * 1000).rounded() / 1000
+        aim.selfFeetOffsetY = max(40, min(200, barToFeetRef.rounded()))
+        aim.feetFromCentreY = feetFromCentreYRef.rounded()
+        guard aim != values.aim else { return }
+        values.aim = aim
     }
 
-    init() {}
-
-    private enum Keys: String, CodingKey {
-        case gameBundleID, captureMode, capturePoints, captureFps, clickOffsetX, clickOffsetY, clickHeight, identifyChampions, heightFactors, attackMode, attackMoveKeyCode, attackMoveClick
-        case clickHoldMs, clickSettleMs, activationKeyCode, attackRangeKeyCode, panelKeyCode
-        case showAttackRange, drawRange, rangeColorHex, rangeRainbow, spellRanges, attackChampionOnly, championOnlyKeyCode, championOnlyMiddleMouse, targetMode
-        case moveClickMinMs, moveClickMaxMs, defaultWindupPercent, extraWindupMs, attackLatencyMs, activationDelayMs, aim, lastChampion
-        case attackOnlyInRange, attackRangeTolerance, stickyTarget, holdRadius, attackResets, clickJitter, fleeKeyCode
-        case helicopterKeyCode, helicopterIntervalMs, helicopterRadius, emoteOnKill, emoteKeyCode, emoteCtrl, combos, layout
-    }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: Keys.self)
-        gameBundleID = try c.decodeIfPresent(String.self, forKey: .gameBundleID) ?? gameBundleID
-        captureMode = try c.decodeIfPresent(String.self, forKey: .captureMode) ?? captureMode
-        capturePoints = try c.decodeIfPresent(Bool.self, forKey: .capturePoints) ?? capturePoints
-        captureFps = try c.decodeIfPresent(Int.self, forKey: .captureFps) ?? captureFps
-        clickOffsetX = try c.decodeIfPresent(Double.self, forKey: .clickOffsetX) ?? clickOffsetX
-        clickOffsetY = try c.decodeIfPresent(Double.self, forKey: .clickOffsetY) ?? clickOffsetY
-        clickHeight = try c.decodeIfPresent(Double.self, forKey: .clickHeight) ?? clickHeight
-        identifyChampions = try c.decodeIfPresent(Bool.self, forKey: .identifyChampions) ?? identifyChampions
-        heightFactors = (try c.decodeIfPresent([String: Double].self, forKey: .heightFactors) ?? heightFactors).filter { Settings.plausibleHeightFactor($0.value, champion: $0.key) }
-        attackMode = try c.decodeIfPresent(String.self, forKey: .attackMode) ?? attackMode
-        attackMoveKeyCode = try c.decodeIfPresent(UInt16.self, forKey: .attackMoveKeyCode) ?? attackMoveKeyCode
-        attackMoveClick = try c.decodeIfPresent(Bool.self, forKey: .attackMoveClick) ?? attackMoveClick
-        clickHoldMs = try c.decodeIfPresent(Int.self, forKey: .clickHoldMs) ?? clickHoldMs
-        clickSettleMs = try c.decodeIfPresent(Int.self, forKey: .clickSettleMs) ?? clickSettleMs
-        activationKeyCode = try c.decodeIfPresent(UInt16.self, forKey: .activationKeyCode) ?? activationKeyCode
-        attackRangeKeyCode = try c.decodeIfPresent(UInt16.self, forKey: .attackRangeKeyCode) ?? attackRangeKeyCode
-        panelKeyCode = try c.decodeIfPresent(UInt16.self, forKey: .panelKeyCode) ?? panelKeyCode
-        showAttackRange = try c.decodeIfPresent(Bool.self, forKey: .showAttackRange) ?? showAttackRange
-        drawRange = try c.decodeIfPresent(Bool.self, forKey: .drawRange) ?? drawRange
-        rangeColorHex = try c.decodeIfPresent(String.self, forKey: .rangeColorHex) ?? rangeColorHex
-        rangeRainbow = try c.decodeIfPresent(Bool.self, forKey: .rangeRainbow) ?? rangeRainbow
-        for (slot, style) in try c.decodeIfPresent([String: SpellRangeStyle].self, forKey: .spellRanges) ?? [:] { spellRanges[slot] = style }
-        attackChampionOnly = try c.decodeIfPresent(Bool.self, forKey: .attackChampionOnly) ?? attackChampionOnly
-        championOnlyKeyCode = try c.decodeIfPresent(UInt16.self, forKey: .championOnlyKeyCode) ?? championOnlyKeyCode
-        championOnlyMiddleMouse = try c.decodeIfPresent(Bool.self, forKey: .championOnlyMiddleMouse) ?? championOnlyMiddleMouse
-        targetMode = try c.decodeIfPresent(String.self, forKey: .targetMode) ?? targetMode
-        moveClickMinMs = try c.decodeIfPresent(Int.self, forKey: .moveClickMinMs) ?? moveClickMinMs
-        moveClickMaxMs = try c.decodeIfPresent(Int.self, forKey: .moveClickMaxMs) ?? moveClickMaxMs
-        defaultWindupPercent = try c.decodeIfPresent(Double.self, forKey: .defaultWindupPercent) ?? defaultWindupPercent
-        extraWindupMs = try c.decodeIfPresent(Int.self, forKey: .extraWindupMs) ?? extraWindupMs
-        attackLatencyMs = try c.decodeIfPresent(Int.self, forKey: .attackLatencyMs) ?? attackLatencyMs
-        activationDelayMs = try c.decodeIfPresent(Int.self, forKey: .activationDelayMs) ?? activationDelayMs
-        attackOnlyInRange = try c.decodeIfPresent(Bool.self, forKey: .attackOnlyInRange) ?? attackOnlyInRange
-        attackRangeTolerance = try c.decodeIfPresent(Double.self, forKey: .attackRangeTolerance) ?? attackRangeTolerance
-        stickyTarget = try c.decodeIfPresent(Bool.self, forKey: .stickyTarget) ?? stickyTarget
-        holdRadius = try c.decodeIfPresent(Double.self, forKey: .holdRadius) ?? holdRadius
-        attackResets = try c.decodeIfPresent(Bool.self, forKey: .attackResets) ?? attackResets
-        clickJitter = try c.decodeIfPresent(Double.self, forKey: .clickJitter) ?? clickJitter
-        fleeKeyCode = try c.decodeIfPresent(UInt16.self, forKey: .fleeKeyCode) ?? fleeKeyCode
-        helicopterKeyCode = try c.decodeIfPresent(UInt16.self, forKey: .helicopterKeyCode) ?? helicopterKeyCode
-        helicopterIntervalMs = try c.decodeIfPresent(Int.self, forKey: .helicopterIntervalMs) ?? helicopterIntervalMs
-        helicopterRadius = try c.decodeIfPresent(Double.self, forKey: .helicopterRadius) ?? helicopterRadius
-        emoteOnKill = try c.decodeIfPresent(Bool.self, forKey: .emoteOnKill) ?? emoteOnKill
-        emoteKeyCode = try c.decodeIfPresent(UInt16.self, forKey: .emoteKeyCode) ?? emoteKeyCode
-        emoteCtrl = try c.decodeIfPresent(Bool.self, forKey: .emoteCtrl) ?? emoteCtrl
-        aim = (try? c.decodeIfPresent(AimSettings.self, forKey: .aim)) ?? aim
-        combos = (try? c.decodeIfPresent(ComboSettings.self, forKey: .combos)) ?? combos
-        layout = (try? c.decodeIfPresent(LayoutSettings.self, forKey: .layout)) ?? layout
-        lastChampion = try c.decodeIfPresent(String.self, forKey: .lastChampion) ?? lastChampion
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: Keys.self)
-        try c.encode(gameBundleID, forKey: .gameBundleID)
-        try c.encode(captureMode, forKey: .captureMode)
-        try c.encode(capturePoints, forKey: .capturePoints)
-        try c.encode(captureFps, forKey: .captureFps)
-        try c.encode(clickOffsetX, forKey: .clickOffsetX)
-        try c.encode(clickOffsetY, forKey: .clickOffsetY)
-        try c.encode(clickHeight, forKey: .clickHeight)
-        try c.encode(identifyChampions, forKey: .identifyChampions)
-        try c.encode(heightFactors, forKey: .heightFactors)
-        try c.encode(attackMode, forKey: .attackMode)
-        try c.encode(attackMoveKeyCode, forKey: .attackMoveKeyCode)
-        try c.encode(attackMoveClick, forKey: .attackMoveClick)
-        try c.encode(clickHoldMs, forKey: .clickHoldMs)
-        try c.encode(clickSettleMs, forKey: .clickSettleMs)
-        try c.encode(activationKeyCode, forKey: .activationKeyCode)
-        try c.encode(attackRangeKeyCode, forKey: .attackRangeKeyCode)
-        try c.encode(panelKeyCode, forKey: .panelKeyCode)
-        try c.encode(showAttackRange, forKey: .showAttackRange)
-        try c.encode(drawRange, forKey: .drawRange)
-        try c.encode(rangeColorHex, forKey: .rangeColorHex)
-        try c.encode(rangeRainbow, forKey: .rangeRainbow)
-        try c.encode(spellRanges, forKey: .spellRanges)
-        try c.encode(attackChampionOnly, forKey: .attackChampionOnly)
-        try c.encode(championOnlyKeyCode, forKey: .championOnlyKeyCode)
-        try c.encode(championOnlyMiddleMouse, forKey: .championOnlyMiddleMouse)
-        try c.encode(targetMode, forKey: .targetMode)
-        try c.encode(moveClickMinMs, forKey: .moveClickMinMs)
-        try c.encode(moveClickMaxMs, forKey: .moveClickMaxMs)
-        try c.encode(defaultWindupPercent, forKey: .defaultWindupPercent)
-        try c.encode(extraWindupMs, forKey: .extraWindupMs)
-        try c.encode(attackLatencyMs, forKey: .attackLatencyMs)
-        try c.encode(activationDelayMs, forKey: .activationDelayMs)
-        try c.encode(attackOnlyInRange, forKey: .attackOnlyInRange)
-        try c.encode(attackRangeTolerance, forKey: .attackRangeTolerance)
-        try c.encode(stickyTarget, forKey: .stickyTarget)
-        try c.encode(holdRadius, forKey: .holdRadius)
-        try c.encode(attackResets, forKey: .attackResets)
-        try c.encode(clickJitter, forKey: .clickJitter)
-        try c.encode(fleeKeyCode, forKey: .fleeKeyCode)
-        try c.encode(helicopterKeyCode, forKey: .helicopterKeyCode)
-        try c.encode(helicopterIntervalMs, forKey: .helicopterIntervalMs)
-        try c.encode(helicopterRadius, forKey: .helicopterRadius)
-        try c.encode(emoteOnKill, forKey: .emoteOnKill)
-        try c.encode(emoteKeyCode, forKey: .emoteKeyCode)
-        try c.encode(emoteCtrl, forKey: .emoteCtrl)
-        try c.encode(aim, forKey: .aim)
-        try c.encode(combos, forKey: .combos)
-        try c.encode(layout, forKey: .layout)
-        try c.encode(lastChampion, forKey: .lastChampion)
+    /** Back to the defaults, keeping only the champion last picked out of game. */
+    func reset() {
+        var fresh = EngineSettings()
+        fresh.lastChampion = values.lastChampion
+        values = fresh
     }
 
     static let fileURL: URL = {
@@ -428,21 +328,20 @@ final class Settings: ObservableObject, Codable, @unchecked Sendable {
     }()
 
     static func load() -> Settings {
-        var loaded: Settings?
+        var loaded: EngineSettings?
         if let data = try? Data(contentsOf: fileURL) {
-            loaded = mergedWithDefaults(data).flatMap { try? JSONDecoder().decode(Settings.self, from: $0) }
+            loaded = decode(data)
             if loaded == nil { Log.warn("config unreadable, starting with defaults: \(fileURL.path)") }
         }
-        let s = loaded ?? Settings()
-        s.save()
-        s.refreshEngine()
-        return s
+        let settings = Settings(values: loaded ?? EngineSettings())
+        settings.save()
+        return settings
     }
 
-    /** Stored JSON laid over the defaults (old overlay calibration moves into aim), so nested groups survive newly added keys. */
-    private static func mergedWithDefaults(_ data: Data) -> Data? {
+    /** A stored config laid over the defaults: missing keys and nulls take their default, a nested group that no longer decodes falls back to its defaults as a whole, the old `overlay` calibration moves into `aim`, and implausible learned heights are dropped; nil when the file does not decode at all. */
+    static func decode(_ data: Data) -> EngineSettings? {
         guard var stored = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let defaultData = try? JSONEncoder().encode(Settings()),
+              let defaultData = try? JSONEncoder().encode(EngineSettings()),
               let defaults = (try? JSONSerialization.jsonObject(with: defaultData)) as? [String: Any] else { return nil }
         if let overlay = stored["overlay"] as? [String: Any] {
             var aim = (stored["aim"] as? [String: Any]) ?? [:]
@@ -451,7 +350,26 @@ final class Settings: ObservableObject, Codable, @unchecked Sendable {
             }
             stored["aim"] = aim
         }
-        return try? JSONSerialization.data(withJSONObject: merge(defaults, stored))
+        var merged = merge(defaults, withoutNulls(stored))
+        let groups: [(key: String, type: any Decodable.Type)] = [("aim", AimSettings.self), ("combos", ComboSettings.self), ("layout", LayoutSettings.self)]
+        for group in groups where !decodes(merged[group.key], as: group.type) { merged[group.key] = defaults[group.key] }
+        guard let mergedData = try? JSONSerialization.data(withJSONObject: merged), var values = try? JSONDecoder().decode(EngineSettings.self, from: mergedData) else { return nil }
+        values.heightFactors = values.heightFactors.filter { plausibleHeightFactor($0.value, champion: $0.key) }
+        return values
+    }
+
+    private static func decodes(_ value: Any?, as type: any Decodable.Type) -> Bool {
+        guard let value, JSONSerialization.isValidJSONObject([value]), let data = try? JSONSerialization.data(withJSONObject: [value]) else { return false }
+        func attempt<T: Decodable>(_: T.Type) -> Bool { (try? JSONDecoder().decode([T].self, from: data)) != nil }
+        return attempt(type)
+    }
+
+    private static func withoutNulls(_ dictionary: [String: Any]) -> [String: Any] {
+        dictionary.compactMapValues { value in
+            if value is NSNull { return nil }
+            if let nested = value as? [String: Any] { return withoutNulls(nested) }
+            return value
+        }
     }
 
     private static func merge(_ base: [String: Any], _ override: [String: Any]) -> [String: Any] {
@@ -469,116 +387,19 @@ final class Settings: ObservableObject, Codable, @unchecked Sendable {
     func save() {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(self) else { return }
+        guard let data = try? encoder.encode(values) else { return }
         try? FileManager.default.createDirectory(at: Self.fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: Self.fileURL)
+        try? data.write(to: Self.fileURL, options: .atomic)
     }
 
-    func reset() {
-        let fresh = Settings()
-        guard let data = try? JSONEncoder().encode(fresh), let copy = try? JSONDecoder().decode(Settings.self, from: data) else { return }
-        gameBundleID = copy.gameBundleID
-        captureMode = copy.captureMode
-        capturePoints = copy.capturePoints
-        captureFps = copy.captureFps
-        clickOffsetX = copy.clickOffsetX
-        clickOffsetY = copy.clickOffsetY
-        clickHeight = copy.clickHeight
-        identifyChampions = copy.identifyChampions
-        heightFactors = copy.heightFactors
-        attackMode = copy.attackMode
-        attackMoveKeyCode = copy.attackMoveKeyCode
-        attackMoveClick = copy.attackMoveClick
-        clickHoldMs = copy.clickHoldMs
-        clickSettleMs = copy.clickSettleMs
-        activationKeyCode = copy.activationKeyCode
-        attackRangeKeyCode = copy.attackRangeKeyCode
-        panelKeyCode = copy.panelKeyCode
-        showAttackRange = copy.showAttackRange
-        drawRange = copy.drawRange
-        rangeColorHex = copy.rangeColorHex
-        rangeRainbow = copy.rangeRainbow
-        spellRanges = copy.spellRanges
-        attackChampionOnly = copy.attackChampionOnly
-        championOnlyKeyCode = copy.championOnlyKeyCode
-        championOnlyMiddleMouse = copy.championOnlyMiddleMouse
-        targetMode = copy.targetMode
-        moveClickMinMs = copy.moveClickMinMs
-        moveClickMaxMs = copy.moveClickMaxMs
-        defaultWindupPercent = copy.defaultWindupPercent
-        extraWindupMs = copy.extraWindupMs
-        attackLatencyMs = copy.attackLatencyMs
-        activationDelayMs = copy.activationDelayMs
-        attackOnlyInRange = copy.attackOnlyInRange
-        attackRangeTolerance = copy.attackRangeTolerance
-        stickyTarget = copy.stickyTarget
-        holdRadius = copy.holdRadius
-        attackResets = copy.attackResets
-        clickJitter = copy.clickJitter
-        fleeKeyCode = copy.fleeKeyCode
-        helicopterKeyCode = copy.helicopterKeyCode
-        helicopterIntervalMs = copy.helicopterIntervalMs
-        helicopterRadius = copy.helicopterRadius
-        emoteOnKill = copy.emoteOnKill
-        emoteKeyCode = copy.emoteKeyCode
-        emoteCtrl = copy.emoteCtrl
-        aim = copy.aim
-        combos = copy.combos
-        layout = copy.layout
-        refreshEngine()
-    }
-
-    /** Rebuilds the engine snapshot from the current values; call on the main thread after changes. */
-    func refreshEngine() {
-        var e = EngineSettings()
-        e.gameBundleID = gameBundleID
-        e.captureMode = captureMode
-        e.capturePoints = capturePoints
-        e.captureFps = captureFps
-        e.clickOffsetX = clickOffsetX
-        e.clickOffsetY = clickOffsetY
-        e.clickHeight = clickHeight
-        e.identifyChampions = identifyChampions
-        e.heightFactors = heightFactors
-        e.attackMode = attackMode
-        e.attackMoveKeyCode = attackMoveKeyCode
-        e.attackMoveClick = attackMoveClick
-        e.clickHoldMs = clickHoldMs
-        e.clickSettleMs = clickSettleMs
-        e.activationKeyCode = activationKeyCode
-        e.attackRangeKeyCode = attackRangeKeyCode
-        e.panelKeyCode = panelKeyCode
-        e.showAttackRange = showAttackRange
-        e.drawRange = drawRange
-        e.attackChampionOnly = attackChampionOnly
-        e.championOnlyKeyCode = championOnlyKeyCode
-        e.championOnlyMiddleMouse = championOnlyMiddleMouse
-        e.targetMode = targetMode
-        e.moveClickMinMs = moveClickMinMs
-        e.moveClickMaxMs = moveClickMaxMs
-        e.defaultWindupPercent = defaultWindupPercent
-        e.extraWindupMs = extraWindupMs
-        e.attackLatencyMs = attackLatencyMs
-        e.activationDelayMs = activationDelayMs
-        e.attackOnlyInRange = attackOnlyInRange
-        e.attackRangeTolerance = attackRangeTolerance
-        e.stickyTarget = stickyTarget
-        e.holdRadius = holdRadius
-        e.attackResets = attackResets
-        e.clickJitter = clickJitter
-        e.fleeKeyCode = fleeKeyCode
-        e.helicopterKeyCode = helicopterKeyCode
-        e.helicopterIntervalMs = helicopterIntervalMs
-        e.helicopterRadius = helicopterRadius
-        e.emoteOnKill = emoteOnKill
-        e.emoteKeyCode = emoteKeyCode
-        e.emoteCtrl = emoteCtrl
-        e.aim = aim
-        e.combos = combos
-        engineLock.withLock { engineSnapshot = e }
-    }
-
+    /** Table key of a champion name in any Riot spelling: its letters, lowercased; ASCII names skip the Unicode path, which gives them the same result six times slower. */
     static func normalize(_ name: String) -> String {
-        String(name.lowercased().filter { $0.isLetter })
+        var letters: [UInt8] = []
+        letters.reserveCapacity(name.utf8.count)
+        for byte in name.utf8 {
+            guard byte < 0x80 else { return String(name.lowercased().filter { $0.isLetter }) }
+            if byte >= 0x61 && byte <= 0x7A { letters.append(byte) } else if byte >= 0x41 && byte <= 0x5A { letters.append(byte | 0x20) }
+        }
+        return String(decoding: letters, as: UTF8.self)
     }
 }

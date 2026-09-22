@@ -53,73 +53,116 @@ enum RangeRingDetector {
     }
 
     /** Axis-aligned ellipse through the points by least squares on centred coordinates; nil when degenerate. */
-    static func fitEllipse(_ points: [CGPoint]) -> (centre: CGPoint, a: Double, b: Double)? {
+    static func fitEllipse(_ points: some Collection<CGPoint>) -> (centre: CGPoint, a: Double, b: Double)? {
         guard points.count >= 4 else { return nil }
         let mx = points.reduce(0) { $0 + $1.x } / Double(points.count)
         let my = points.reduce(0) { $0 + $1.y } / Double(points.count)
-        var m = [[Double]](repeating: [Double](repeating: 0, count: 4), count: 4)
-        var v = [Double](repeating: 0, count: 4)
+        var normal = Matrix4()
+        var v = SIMD4<Double>()
         for p in points {
             let x = p.x - mx, y = p.y - my
-            let row = [x * x, y * y, x, y]
-            for i in 0..<4 {
-                v[i] += row[i]
-                for j in 0..<4 { m[i][j] += row[i] * row[j] }
-            }
+            let row = SIMD4(x * x, y * y, x, y)
+            v += row
+            for i in 0..<4 { normal[i] += row[i] * row }
         }
-        guard let s = solve(m, v), s[0] > 0, s[1] > 0 else { return nil }
+        guard let s = solve(normal, v), s[0] > 0, s[1] > 0 else { return nil }
         let ex = -s[2] / (2 * s[0]), ey = -s[3] / (2 * s[1])
         let k = 1 + s[0] * ex * ex + s[1] * ey * ey
         guard k > 0 else { return nil }
         return (CGPoint(x: ex + mx, y: ey + my), (k / s[0]).squareRoot(), (k / s[1]).squareRoot())
     }
 
-    /** Gaussian elimination with partial pivoting. */
-    private static func solve(_ matrix: [[Double]], _ rhs: [Double]) -> [Double]? {
+    /** The 4×4 normal equations, kept in registers. */
+    private struct Matrix4 {
+        private var rows = (SIMD4<Double>(), SIMD4<Double>(), SIMD4<Double>(), SIMD4<Double>())
+
+        subscript(row: Int) -> SIMD4<Double> {
+            get {
+                switch row {
+                case 0: return rows.0
+                case 1: return rows.1
+                case 2: return rows.2
+                default: return rows.3
+                }
+            }
+            set {
+                switch row {
+                case 0: rows.0 = newValue
+                case 1: rows.1 = newValue
+                case 2: rows.2 = newValue
+                default: rows.3 = newValue
+                }
+            }
+        }
+
+        mutating func swapAt(_ i: Int, _ j: Int) {
+            (self[i], self[j]) = (self[j], self[i])
+        }
+    }
+
+    /** Gauss-Jordan elimination with partial pivoting; only the columns right of the pivot are updated, as the result reads nothing else. */
+    private static func solve(_ matrix: Matrix4, _ rhs: SIMD4<Double>) -> SIMD4<Double>? {
         var a = matrix, b = rhs
-        let n = b.count
-        for i in 0..<n {
+        for i in 0..<4 {
             var pivot = i
-            for r in i..<n where abs(a[r][i]) > abs(a[pivot][i]) { pivot = r }
+            for r in i..<4 where abs(a[r][i]) > abs(a[pivot][i]) { pivot = r }
             guard abs(a[pivot][i]) > 1e-12 else { return nil }
             a.swapAt(i, pivot)
-            b.swapAt(i, pivot)
-            for r in 0..<n where r != i {
-                let f = a[r][i] / a[i][i]
-                for col in i..<n { a[r][col] -= f * a[i][col] }
+            (b[i], b[pivot]) = (b[pivot], b[i])
+            let pivotRow = a[i]
+            for r in 0..<4 where r != i {
+                var row = a[r]
+                let f = row[i] / pivotRow[i]
+                for col in i..<4 { row[col] -= f * pivotRow[col] }
+                a[r] = row
                 b[r] -= f * b[i]
             }
         }
-        return (0..<n).map { b[$0] / a[$0][$0] }
+        return SIMD4(b[0] / a[0][0], b[1] / a[1][1], b[2] / a[2][2], b[3] / a[3][3])
     }
 
-    private static func normalizedRadius(_ p: CGPoint, _ fit: (centre: CGPoint, a: Double, b: Double)) -> Double {
-        hypot((p.x - fit.centre.x) / fit.a, (p.y - fit.centre.y) / fit.b)
+    /** Whether the point lies within 1.2 % of the ellipse's radius; the squared radius settles the clear cases, so `hypot` runs only near the band. */
+    @inline(__always)
+    private static func isInlier(_ p: CGPoint, _ fit: (centre: CGPoint, a: Double, b: Double)) -> Bool {
+        let u = (p.x - fit.centre.x) / fit.a, v = (p.y - fit.centre.y) / fit.b
+        let squared = u * u + v * v
+        guard squared > 0.97, squared < 1.03 else { return false }
+        return abs(hypot(u, v) - 1) < 0.012
     }
 
     /** RANSAC over the candidates: the axis-aligned ellipse with the most points within 1.2 % of its radius, preferring the size expected for the attack ring over other indicators; the fit must cover most rays and have the axis ratio the camera pitch produces. */
     static func detect(frame: Frame, origin: CGPoint, expectedA: Double, ringUnits: Double, screenCentre: CGPoint, now: Double) -> RangeRing? {
+        var generator = SystemRandomNumberGenerator()
+        return detect(frame: frame, origin: origin, expectedA: expectedA, ringUnits: ringUnits, screenCentre: screenCentre, now: now, using: &generator)
+    }
+
+    /** Same as `detect`, drawing the RANSAC samples from `generator` so a seeded run is reproducible. */
+    static func detect(frame: Frame, origin: CGPoint, expectedA: Double, ringUnits: Double, screenCentre: CGPoint, now: Double, using generator: inout some RandomNumberGenerator) -> RangeRing? {
         let points = candidates(frame: frame, origin: origin, expectedA: expectedA)
         guard points.count >= 16 else { return nil }
-        var generator = SystemRandomNumberGenerator()
-        var best: (inliers: [CGPoint], score: Double)?
+        var best: (fit: (centre: CGPoint, a: Double, b: Double), inliers: Int, score: Double)?
+        var sample = [CGPoint](repeating: .zero, count: 6)
+        var picked = [Int](repeating: 0, count: 6)
         for _ in 0..<300 {
-            var sample: [CGPoint] = []
-            var used = Set<Int>()
-            while sample.count < 6 {
+            var count = 0
+            while count < 6 {
                 let index = Int.random(in: 0..<points.count, using: &generator)
-                if used.insert(index).inserted { sample.append(points[index]) }
+                guard !picked[..<count].contains(index) else { continue }
+                picked[count] = index
+                sample[count] = points[index]
+                count += 1
             }
             guard let fit = fitEllipse(sample), fit.a > 0.3 * expectedA, fit.a < 2.5 * expectedA, fit.b / fit.a > 0.6, fit.b / fit.a < 1.0 else { continue }
-            let inliers = points.filter { abs(normalizedRadius($0, fit) - 1) < 0.012 }
-            let score = Double(inliers.count) - 10 * abs(fit.a - expectedA) / expectedA
+            var inliers = 0
+            for point in points where isInlier(point, fit) { inliers += 1 }
+            let score = Double(inliers) - 10 * abs(fit.a - expectedA) / expectedA
             if let current = best, score <= current.score { continue }
-            best = (inliers, score)
+            best = (fit, inliers, score)
         }
-        guard let candidate = best, candidate.inliers.count >= 20, let fit = fitEllipse(candidate.inliers) else { return nil }
-        let inliers = points.filter { abs(normalizedRadius($0, fit) - 1) < 0.012 }
-        guard inliers.count * 5 >= rays * 3, fit.b / fit.a > 0.79, fit.b / fit.a < 0.85 else { return nil }
-        return solve(centre: fit.centre, a: fit.a, b: fit.b, inliers: inliers.count, candidates: points.count, ringUnits: ringUnits, frameHeight: Double(frame.height), screenCentre: screenCentre, now: now)
+        guard let candidate = best, candidate.inliers >= 20, let fit = fitEllipse(points.filter { isInlier($0, candidate.fit) }) else { return nil }
+        let inliers = points.reduce(0) { $0 + (isInlier($1, fit) ? 1 : 0) }
+        guard inliers * 5 >= rays * 3, fit.b / fit.a > 0.79, fit.b / fit.a < 0.85 else { return nil }
+        return solve(centre: fit.centre, a: fit.a, b: fit.b, inliers: inliers, candidates: points.count, ringUnits: ringUnits, frameHeight: Double(frame.height), screenCentre: screenCentre, now: now)
     }
 
     /** From the horizontal semi-axis and the known radius: kx = a·√(q0² − γ²)/r with γ = c·r from the camera constant, and ζ (feet depth) from how far the ellipse centre sits below the projected circle centre. */

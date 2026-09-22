@@ -126,7 +126,7 @@ final class Vision: @unchecked Sendable {
         let icons = abilityIcons()
         let attackRange = attackRange()
         let enemies = enemyPlayers()
-        var crop: (hit: PixelHit, job: (image: CGImage, fillX: Double, fillY: Double))?
+        var crop: (hit: PixelHit, job: (image: CGImage, fillX: Double, fillY: Double, scale: Int))?
         let comboSlots = cfg.combos.enabled ? cfg.combo(for: icons.champion).steps.filter { $0.enabled }.map { $0.slot } : []
         let result: (scan: ScanResult, width: Int, height: Int, flow: (dx: Double, dy: Double, patches: Int)?, ready: [String: Bool], ring: RangeRing?)? = game.capture.withLatestFrame { frame in
             let config = cfg.detectionConfig(frameWidth: frame.width, frameHeight: frame.height)
@@ -215,7 +215,7 @@ final class Vision: @unchecked Sendable {
         }
         for track in remaining where now - track.lastSeenMs < 1500 { updated.append(track) }
         if let crop, let track = updated.first(where: { Int($0.x) == crop.hit.x && Int($0.y) == crop.hit.y && $0.lastSeenMs == now }) {
-            names.submit(NameReader.Job(trackID: track.id, image: crop.job.image, fillX: crop.job.fillX, fillY: crop.job.fillY, atMs: now))
+            names.submit(NameReader.Job(trackID: track.id, image: crop.job.image, scale: crop.job.scale, fillX: crop.job.fillX, fillY: crop.job.fillY, atMs: now))
         }
         for index in updated.indices {
             if enemies.isEmpty {
@@ -274,7 +274,7 @@ final class Vision: @unchecked Sendable {
         published.flowMs = flowMs
         published.motionMs = motionMs
         published.abilityReady = result.ready
-        published.hudText = hud.statusText
+        published.hud = hud.status
         published.projection = projection
         published.windowFrame = game.capture.windowFrame
         if let feet = published.selfPoint(cfg: cfg), now - selfSeenMs < 1000 || projection.feetFresh {
@@ -298,13 +298,13 @@ final class Vision: @unchecked Sendable {
         }.min { hypot($0.centerX - cx, $0.y - cy) < hypot($1.centerX - cx, $1.y - cy) }
     }
 
-    /** Crop of the level box, the fill and the name plate above an enemy bar for the text recogniser, doubled at 1× capture. */
-    private func nameCrop(_ frame: Frame, hit: PixelHit, config: DetectionConfig, enlarge: Bool = false) -> (image: CGImage, fillX: Double, fillY: Double)? {
+    /** Crop of the level box, the fill and the name plate above an enemy bar for the text recogniser; at 1× capture the reader doubles it on its own queue, and the fill start is given at that scale. */
+    private func nameCrop(_ frame: Frame, hit: PixelHit, config: DetectionConfig) -> (image: CGImage, fillX: Double, fillY: Double, scale: Int)? {
         let sy = Double(frame.height) / 1080
         let x0 = hit.x - config.boxWidth * 3, y0 = hit.y - Int(34 * sy)
-        let scale = frame.width < 3000 || enlarge ? 2 : 1
-        guard let image = FrameDump.crop(frame, x: x0, y: y0, width: max(config.barWidth, hit.width) + config.boxWidth * 3, height: hit.y - y0 + hit.height + Int(6 * sy), scale: scale) else { return nil }
-        return (image, Double((hit.x - max(0, x0)) * scale), Double((hit.y - max(0, y0)) * scale))
+        let scale = frame.width < 3000 ? 2 : 1
+        guard let image = FrameDump.crop(frame, x: x0, y: y0, width: max(config.barWidth, hit.width) + config.boxWidth * 3, height: hit.y - y0 + hit.height + Int(6 * sy)) else { return nil }
+        return (image, Double((hit.x - max(0, x0)) * scale), Double((hit.y - max(0, y0)) * scale), scale)
     }
 
     /** Tries the ring around the best guess of the feet: the last ring, else the own bar plus the learned offset, else the last feet position; a ring far from the expected attack ring size is another indicator and is ignored. */
@@ -323,10 +323,6 @@ final class Vision: @unchecked Sendable {
         let expectedA = (lastKx > 0 ? lastKx : cfg.aim.pxPerUnitX * sx) * ringUnits
         guard let hit = RangeRingDetector.detect(frame: frame, origin: origin, expectedA: expectedA, ringUnits: ringUnits, screenCentre: centre, now: now) else { return nil }
         return abs(hit.a - expectedA) <= 0.3 * expectedA ? hit : nil
-    }
-
-    private func ownMeshHeight() -> Double {
-        (ChampionModels.model(for: ownChampion()) ?? ChampionModels.fallback).meshHeight
     }
 
     /** Scale from the ring (drawn at attack range + gameplay radius, smoothed over fits), perspective tied to it by the camera constant, feet from the ring when fresh, else from the own bar; without a fresh ring the champion's shift above or below its calibrated screen position gives the terrain height, which rescales the last value. */
@@ -432,7 +428,7 @@ final class Vision: @unchecked Sendable {
             flowPreviousMs = now
         }
         guard now - flowPreviousMs < 200 else { return nil }
-        return Self.groundShift(from: flowPrevious, in: frame)
+        return Self.groundShift(from: flowPrevious, to: current, in: frame)
     }
 
     /** Eight fixed ground patches (green channel, sampled every `step` px so 2x frames cost the same) around, but not on, the champion. */
@@ -447,7 +443,11 @@ final class Vision: @unchecked Sendable {
 
     /** Where the previous patches ended up in this frame: median shift in px and how many patches agreed. */
     static func groundShift(from previous: [FlowPatch], in frame: Frame) -> (dx: Double, dy: Double, patches: Int)? {
-        let current = flowPatches(of: frame)
+        groundShift(from: previous, to: flowPatches(of: frame), in: frame)
+    }
+
+    /** `groundShift` with this frame's patches already extracted (only their placement is compared). */
+    static func groundShift(from previous: [FlowPatch], to current: [FlowPatch], in frame: Frame) -> (dx: Double, dy: Double, patches: Int)? {
         guard previous.count == current.count else { return nil }
         var dxs: [Int] = []
         var dys: [Int] = []

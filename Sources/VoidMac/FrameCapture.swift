@@ -3,9 +3,11 @@ import CoreVideo
 import Foundation
 import ScreenCaptureKit
 
-enum CaptureMode: String {
-    case window
-    case display
+/** What ScreenCaptureKit captures: the game window alone, or the display cropped to it. */
+enum CaptureMode: String, SettingChoice {
+    case window, display
+
+    static let fallback = CaptureMode.window
 }
 
 struct Frame {
@@ -28,21 +30,38 @@ final class FrameCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked
     private var latest: CVPixelBuffer?
     private var frameCounter = 0
     private var fpsWindowStart = nowMs()
-    private(set) var fps = 0.0
-    private var windowFrameStorage = CGRect.zero
-
-    /** The captured window's rect in points, taken under the lock its writer uses. */
-    var windowFrame: CGRect { lock.withLock { windowFrameStorage } }
-    private(set) var windowID: CGWindowID = 0
-    var windowLayer = 0
-    private(set) var mode = CaptureMode.window
-    private(set) var startedAtMs = 0.0
-    private(set) var lastFrameAtMs = 0.0
-    private(set) var pixelSize = CGSize.zero
-    private(set) var native = false
+    private var attached = Attachment()
+    private var lastFrameStorage = 0.0
     private var configuration: SCStreamConfiguration?
     private var currentRate = 12
     private let rateQueue = DispatchQueue(label: "voidmac.capture.rate")
+
+    /** What the running stream is attached to, written and read under `lock`. */
+    private struct Attachment {
+        var windowFrame = CGRect.zero
+        var windowID: CGWindowID = 0
+        var windowLayer = 0
+        var mode = CaptureMode.window
+        var native = false
+        var startedAtMs = 0.0
+        var pixelSize = CGSize.zero
+        var fps = 0.0
+    }
+
+    /** The captured window's rect in points. */
+    var windowFrame: CGRect { lock.withLock { attached.windowFrame } }
+    var windowID: CGWindowID { lock.withLock { attached.windowID } }
+    var windowLayer: Int {
+        get { lock.withLock { attached.windowLayer } }
+        set { lock.withLock { attached.windowLayer = newValue } }
+    }
+    var mode: CaptureMode { lock.withLock { attached.mode } }
+    var native: Bool { lock.withLock { attached.native } }
+    var startedAtMs: Double { lock.withLock { attached.startedAtMs } }
+    var pixelSize: CGSize { lock.withLock { attached.pixelSize } }
+    var fps: Double { lock.withLock { attached.fps } }
+    /** Arrival time of the newest frame, under the condition its waiters sleep on. */
+    var lastFrameAtMs: Double { frameCondition.withLock { lastFrameStorage } }
 
     var isRunning: Bool { lock.withLock { stream != nil } }
     var hasFrame: Bool { lock.withLock { latest != nil } }
@@ -95,14 +114,9 @@ final class FrameCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked
         lock.withLock {
             stream = newStream
             latest = nil
-            windowFrameStorage = window.frame
-            windowID = window.windowID
-            windowLayer = window.windowLayer
-            mode = usedMode
-            native = useNative
+            attached = Attachment(windowFrame: window.frame, windowID: window.windowID, windowLayer: window.windowLayer, mode: usedMode, native: useNative,
+                                  startedAtMs: nowMs(), pixelSize: CGSize(width: config.width, height: config.height), fps: attached.fps)
             configuration = config
-            startedAtMs = nowMs()
-            pixelSize = CGSize(width: config.width, height: config.height)
             frameCounter = 0
             fpsWindowStart = nowMs()
         }
@@ -155,13 +169,13 @@ final class FrameCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked
             frameCounter += 1
             let elapsed = nowMs() - fpsWindowStart
             if elapsed >= 1000 {
-                fps = Double(frameCounter) * 1000 / elapsed
+                attached.fps = Double(frameCounter) * 1000 / elapsed
                 frameCounter = 0
                 fpsWindowStart = nowMs()
             }
         }
         frameCondition.lock()
-        lastFrameAtMs = nowMs()
+        lastFrameStorage = nowMs()
         frameCondition.broadcast()
         frameCondition.unlock()
     }
@@ -171,8 +185,8 @@ final class FrameCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked
         let deadline = Date(timeIntervalSinceNow: Double(timeoutMs) / 1000)
         frameCondition.lock()
         defer { frameCondition.unlock() }
-        while lastFrameAtMs <= stamp, frameCondition.wait(until: deadline) {}
-        return lastFrameAtMs > stamp
+        while lastFrameStorage <= stamp, frameCondition.wait(until: deadline) {}
+        return lastFrameStorage > stamp
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {

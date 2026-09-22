@@ -33,14 +33,15 @@ enum FrameDump {
         let data = UnsafeMutableRawPointer.allocate(byteCount: frame.bytesPerRow * frame.height, alignment: 16)
         defer { data.deallocate() }
         data.copyMemory(from: frame.base, byteCount: frame.bytesPerRow * frame.height)
-        let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
         let context = CGContext(data: data, width: frame.width, height: frame.height, bitsPerComponent: 8,
-                                bytesPerRow: frame.bytesPerRow, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info.rawValue)
+                                bytesPerRow: frame.bytesPerRow, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: bgra.rawValue)
         return context?.makeImage()
     }
 
-    /** Copy of a frame region as an image, drawn `scale`× larger so small HUD text stays readable for the text recogniser. */
-    static func crop(_ frame: Frame, x: Int, y: Int, width: Int, height: Int, scale: Int) -> CGImage? {
+    private static let bgra = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+
+    /** Copy of a frame region as an image: a row copy, cheap enough for the vision thread. */
+    static func crop(_ frame: Frame, x: Int, y: Int, width: Int, height: Int) -> CGImage? {
         let x0 = max(0, x), y0 = max(0, y)
         let w = min(frame.width - x0, width), h = min(frame.height - y0, height)
         guard w > 8, h > 8 else { return nil }
@@ -50,14 +51,18 @@ enum FrameDump {
             guard let base = buffer.baseAddress else { return }
             for row in 0..<h { base.advanced(by: row * bytesPerRow).copyMemory(from: frame.base + (y0 + row) * frame.bytesPerRow + x0 * 4, byteCount: bytesPerRow) }
         }
-        let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
-        guard let provider = CGDataProvider(data: data as CFData),
-              let image = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: bytesPerRow, space: CGColorSpaceCreateDeviceRGB(),
-                                  bitmapInfo: info, provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else { return nil }
-        guard scale > 1, let context = CGContext(data: nil, width: w * scale, height: h * scale, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info.rawValue) else { return image }
+        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
+        return CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: bytesPerRow, space: CGColorSpaceCreateDeviceRGB(),
+                       bitmapInfo: bgra, provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+    }
+
+    /** The image drawn `scale`× larger with high-quality interpolation, so small HUD text stays readable for the text recogniser. */
+    static func enlarged(_ image: CGImage, scale: Int) -> CGImage {
+        guard scale > 1, let context = CGContext(data: nil, width: image.width * scale, height: image.height * scale, bitsPerComponent: 8, bytesPerRow: 0,
+                                                 space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: bgra.rawValue) else { return image }
         context.interpolationQuality = .high
-        context.draw(image, in: CGRect(x: 0, y: 0, width: w * scale, height: h * scale))
-        return context.makeImage()
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width * scale, height: image.height * scale))
+        return context.makeImage() ?? image
     }
 
     /** Copies the frame now (a few ms) and writes `<name>.png` into the records folder later, keeping the newest files per kind (name prefix): 12 champion frames, 3 HUD suspects, 8 of anything else. */
@@ -91,7 +96,7 @@ enum FrameDump {
                   let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)
             else { return "Could not encode the frame" }
             CGImageDestinationAddImage(destination, image, nil)
-            guard CGImageDestinationFinalize(destination) else { return "Nelze zapsat \(url.path)" }
+            guard CGImageDestinationFinalize(destination) else { return "Could not write \(url.path)" }
             return "Saved \(frame.width)x\(frame.height) px to \(url.lastPathComponent), champion bars found: \(bars)"
         }
         return result ?? "No frame yet (is the game window visible?)"

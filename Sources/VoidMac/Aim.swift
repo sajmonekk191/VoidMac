@@ -13,7 +13,7 @@ struct AimPlan {
     let enemyID: Int
     let predictedMs: Double
     let distanceUnits: Double
-    let castMode: String
+    let castMode: CastMode
     let createdMs: Double
 }
 
@@ -184,11 +184,11 @@ final class Autoaim: @unchecked Sendable {
             chosen = locked
         } else {
             switch cfg.aim.targetMode {
-            case "lowest":
+            case .lowest:
                 chosen = fresh.min { $0.fillRatio < $1.fillRatio }
-            case "nearest":
+            case .nearest:
                 chosen = nearestToSelf
-            default:
+            case .cursor:
                 let nearCursor = fresh.min { distance(vis.targetPoint($0, cfg: cfg), cursorPx) < distance(vis.targetPoint($1, cfg: cfg), cursorPx) }
                 if let nearCursor, distance(vis.targetPoint(nearCursor, cfg: cfg), cursorPx) <= cfg.aim.cursorRadius * sx {
                     chosen = nearCursor
