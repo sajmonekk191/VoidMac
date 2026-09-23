@@ -36,19 +36,19 @@ final class RangeOverlay {
         panel.contentView = view
     }
 
-    /** Places the window over the ellipses (paths in game-window points, top-left origin; the game frame in Quartz coordinates); the reach in the "#RRGGBB" colour, extras in theirs; nil reach hides it. */
+    /** Places the window over the ellipses (paths in game-window points, top-left origin; the game frame in Quartz coordinates); the reach in the "#RRGGBB" colour, extras in theirs; nothing to draw hides it. */
     func update(gameFrame: CGRect, level: NSWindow.Level, colorHex: String, reach: CGPath?, gate: CGPath?, extras: [Extra]) {
-        guard let reach, gameFrame.width > 0, let primary = NSScreen.screens.first else {
+        guard reach != nil || !extras.isEmpty, gameFrame.width > 0, let primary = NSScreen.screens.first else {
             if panel.isVisible { panel.orderOut(nil) }
             lastKey = ""
             lastColor = ""
             return
         }
-        var box = reach.boundingBox
+        var box = reach?.boundingBox ?? .null
         if let gate { box = box.union(gate.boundingBox) }
         for extra in extras { box = box.union(extra.path.boundingBox) }
         box = box.insetBy(dx: -6, dy: -6).integral
-        var key = "\(Int(gameFrame.minX)),\(Int(gameFrame.minY)),\(Int(box.minX)),\(Int(box.minY)),\(Int(box.width)),\(Int(box.height)),\(gate == nil)"
+        var key = "\(Int(gameFrame.minX)),\(Int(gameFrame.minY)),\(Int(box.minX)),\(Int(box.minY)),\(Int(box.width)),\(Int(box.height)),\(gate == nil),\(reach == nil)"
         for extra in extras { key += ";\(Int(extra.path.boundingBox.minX)),\(Int(extra.path.boundingBox.minY)),\(Int(extra.path.boundingBox.width)),\(extra.colorHex)" }
         let scale = panel.screen?.backingScaleFactor ?? primary.backingScaleFactor
         if key != lastKey || !panel.isVisible {
@@ -66,7 +66,8 @@ final class RangeOverlay {
             CATransaction.setDisableActions(true)
             for layer in [gateLayer, reachLayer] + extraLayers { layer.contentsScale = scale }
             view.layer?.contentsScale = scale
-            reachLayer.path = reach.copy(using: &shift)
+            reachLayer.path = reach?.copy(using: &shift)
+            reachLayer.isHidden = reach == nil
             gateLayer.path = gate?.copy(using: &shift)
             gateLayer.isHidden = gate == nil
             for (index, layer) in extraLayers.enumerated() {

@@ -18,10 +18,20 @@ private func decode(_ json: String) -> EngineSettings? {
         "activationDelayMs", "activationKeyCode", "aim", "attackChampionOnly", "attackLatencyMs", "attackMode", "attackMoveClick", "attackMoveKeyCode",
         "attackOnlyInRange", "attackRangeKeyCode", "attackRangeTolerance", "attackResets", "captureFps", "captureMode", "capturePoints", "championOnlyKeyCode",
         "championOnlyMiddleMouse", "clickHeight", "clickHoldMs", "clickJitter", "clickOffsetX", "clickOffsetY", "clickSettleMs", "combos", "defaultWindupPercent",
-        "drawRange", "emoteCtrl", "emoteKeyCode", "emoteOnKill", "extraWindupMs", "gameBundleID", "heightFactors", "helicopterIntervalMs", "helicopterKeyCode",
-        "helicopterRadius", "holdRadius", "identifyChampions", "lastChampion", "layout", "moveClickMaxMs", "moveClickMinMs", "panelKeyCode", "rangeColorHex",
-        "rangeRainbow", "showAttackRange", "spellRanges", "stickyTarget", "targetMode", "waveclearKeyCode",
+        "defense", "drawRange", "emoteCtrl", "emoteKeyCode", "emoteOnKill", "extraWindupMs", "gameBundleID", "heightFactors", "helicopterIntervalMs", "helicopterKeyCode",
+        "helicopterRadius", "holdRadius", "identifyChampions", "lastChampion", "lastHit", "layout", "moveClickMaxMs", "moveClickMinMs", "panelKeyCode", "rangeColorHex",
+        "rangeRainbow", "showAttackRange", "spellRanges", "stickyTarget", "targetMode", "targetPriority", "waveclearKeyCode", "waveclearShowRange",
     ])
+}
+
+@Test func farmingDefenseAndPriorityDecodeWithTheirDefaults() throws {
+    let values = try #require(decode(#"{"targetMode": "priority", "targetPriority": ["jinx", "ahri"], "lastHit": {"keyCode": "x"}, "defense": {"healthPercent": 30}, "aim": {"targetMode": "priority"}}"#))
+    #expect(values.targetMode == .priority && values.aim.targetMode == .priority)
+    #expect(values.targetPriority == ["jinx", "ahri"])
+    #expect(values.lastHit == LastHitSettings())
+    #expect(values.defense.healthPercent == 30 && values.defense.autoSummoner && values.defense.onlyWhenDamaged)
+    #expect(EngineSettings().lastHit.keyCode == 7 && !EngineSettings().lastHit.whileOrbwalking)
+    #expect(!values.lastHit.showRange && !values.waveclearShowRange)
 }
 
 @Test func missingKeysAndNullsTakeTheirDefaults() throws {

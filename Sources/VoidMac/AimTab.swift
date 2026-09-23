@@ -29,8 +29,9 @@ struct AimTab: View {
                         Text("Near cursor").tag(AimTargetMode.cursor)
                         Text("Nearest").tag(AimTargetMode.nearest)
                         Text("Lowest HP").tag(AimTargetMode.lowest)
+                        Text("Priority").tag(AimTargetMode.priority)
                     }
-                    .pickerStyle(.segmented).labelsHidden().frame(width: 260)
+                    .pickerStyle(.segmented).labelsHidden().frame(width: 330)
                 }
                 if settings.aim.targetMode == .cursor {
                     SettingRow(label: "Radius around the cursor", hint: "\(Int(settings.aim.cursorRadius)) px at 1920×1080; farther from the cursor the nearest enemy is taken") {
@@ -109,6 +110,7 @@ struct AimTab: View {
         case .nearest: return "Enemy nearest to you"
         case .lowest: return "Enemy with the lowest HP share"
         case .cursor: return "Enemy nearest the cursor, else nearest to you"
+        case .priority: return "The first champion of the priority list (Orbwalker tab) in the spell's range, the nearest among equals"
         }
     }
 

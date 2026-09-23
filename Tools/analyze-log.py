@@ -29,6 +29,10 @@ RE = {
     "oor": re.compile(r"nearest (\d+) units feet to feet, limit (\d+)"),
     "nowindow": re.compile(r"not found; SCK windows"),
     "own": re.compile(r"\[i\] own bar: .*?; (\w[\w' ]*) mesh"),
+    "lasthit": re.compile(r"\[i\] last hit m\d+: \d+ % in the frame"),
+    "outcome": re.compile(r"\[i\] last hit m\d+: (killed|gone without|survived at)"),
+    "learned": re.compile(r"our hit took \d+ %: a (\w+) minion, damage ([\d.]+) of the model \(efficiency now ([\d.]+)\)"),
+    "defense": re.compile(r"\[i\] auto (Heal|Barrier) \(\w, key \w+\): health (\d+) %"),
 }
 
 
@@ -42,10 +46,15 @@ def quantiles(values):
     return v[len(v) // 2], v[int(len(v) * 0.9)] if len(v) > 1 else v[0]
 
 
+def interesting(block):
+    """A session worth a block: ten champion attacks or five last-hit attacks."""
+    return sum(1 for l in block if RE["attack"].match(l)) >= 10 or sum(1 for l in block if RE["lasthit"].search(l)) >= 5
+
+
 def report(block, label):
     attacks = [RE["attack"].match(l) for l in block]
     attacks = [m for m in attacks if m]
-    if len(attacks) < 10:
+    if not interesting(block):
         return
     champ = next((RE["own"].search(l).group(1) for l in block if RE["own"].search(l)), "?")
     print("\n=== %s   champion %s   attacks %d ===" % (label, champ, len(attacks)))
@@ -113,6 +122,19 @@ def report(block, label):
               "  ".join("%s %d/%d" % (c, n, hit_by.get(c, 0)) for c, n in worst)))
 
 
+    attempts = sum(1 for l in block if RE["lasthit"].search(l))
+    if attempts:
+        outcomes = Counter(m.group(1) for l in block for m in [RE["outcome"].search(l)] if m)
+        learned = [(m.group(1), float(m.group(2)), float(m.group(3))) for l in block for m in [RE["learned"].search(l)] if m]
+        kinds = Counter(k for k, _, _ in learned)
+        print("  last hits    attempts %-4d killed %d (%.0f%%)  taken by others %d  survived %d%s"
+              % (attempts, outcomes["killed"], 100 * outcomes["killed"] / attempts, outcomes["gone without"], outcomes["survived at"],
+                 ("  | learned %s, efficiency %.2f" % (" ".join("%s x%d" % kv for kv in kinds.most_common()), learned[-1][2])) if learned else ""))
+
+    heals = [(m.group(1), int(m.group(2))) for l in block for m in [RE["defense"].search(l)] if m]
+    if heals:
+        print("  auto defense %d casts at health %s" % (len(heals), ", ".join("%s %d%%" % h for h in heals[:6])))
+
     oor = [(int(m.group(1)), int(m.group(2))) for l in block for m in [RE["oor"].search(l)] if m]
     nowin = sum(1 for l in block if RE["nowindow"].search(l))
     tail = []
@@ -137,15 +159,14 @@ def main():
     path = path or os.path.expanduser(LOG)
     lines = open(path, errors="replace").read().split("\n")
     segs = sessions(lines)
-    print("%s: %d lines, %d sessions (showing the last %d with attacks)" % (path, len(lines), len(segs), last))
+    print("%s: %d lines, %d sessions (showing the last %d with attacks or last hits)" % (path, len(lines), len(segs), last))
     shown = 0
     for a, b in reversed(segs):
         if shown >= last:
             break
-        before = shown
         report(lines[a:b], lines[a].split(" ")[0])
-        if sum(1 for l in lines[a:b] if RE["attack"].match(l)) >= 10:
-            shown = before + 1
+        if interesting(lines[a:b]):
+            shown += 1
 
 
 if __name__ == "__main__":

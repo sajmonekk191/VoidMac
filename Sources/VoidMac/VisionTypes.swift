@@ -34,8 +34,64 @@ struct EnemyTrack: Identifiable, Equatable {
     var trackedMs: Double { (history.last?.t ?? lastSeenMs) - (history.first?.t ?? lastSeenMs) }
 }
 
+/** One health reading of a minion bar: time and share of the full bar. */
+struct HealthSample: Equatable {
+    var t: Double
+    var fraction: Double
+}
+
+/** An enemy minion followed across frames: its bar in frame px, its health share with the last 1.5 s of readings and the loss rate derived from them, and what the game's last-hit assist draws on it. */
+struct MinionTrack: Identifiable, Equatable {
+    let id: Int
+    var x: Double
+    var y: Double
+    var span: Int
+    var height: Int
+    var fraction: Double
+    var white = false
+    var large = false
+    var mark: Double?
+    /** The one-shot share the bar showed last while red: a white bar no longer shows it. */
+    var lastMark: Double?
+    /** Consecutive frames the mark stood at the same share: one frame of a gap in the fill is not the game's mark. */
+    var markSightings = 0
+    var sightings = 1
+    var firstSeenMs: Double
+    var lastSeenMs: Double
+    var maxFraction: Double
+    var samples: [HealthSample] = []
+    var lossPerMs = 0.0
+
+    var centerX: Double { x + Double(span) / 2 }
+
+    /** Seen with health in it, white (the tracker starts a white track only from a bar of the exact height), or seen losing at least 3 % of its bar: a static red mark of the HUD or the chat never is. */
+    var confirmed: Bool { maxFraction >= 0.15 || white || (sightings >= 6 && maxFraction - fraction >= 0.03) }
+
+    /** Health share lost per ms over the readings: drops a minion or a turret deals are summed, a single drop over a quarter of the bar is a champion's burst and left out, and anything under 0.6 px is noise. */
+    static func lossRate(_ samples: [HealthSample], span: Int) -> Double {
+        guard let first = samples.first, let last = samples.last, last.t - first.t >= 250 else { return 0 }
+        let noise = 0.6 / Double(max(1, span))
+        var lost = 0.0
+        var level = first.fraction
+        for sample in samples.dropFirst() {
+            let drop = level - sample.fraction
+            if drop > noise {
+                if drop <= 0.25 { lost += drop }
+                level = sample.fraction
+            } else if drop < -noise * 3 {
+                level = sample.fraction
+            }
+        }
+        return lost / (last.t - first.t)
+    }
+}
+
 struct VisionSnapshot: Equatable {
     var enemies: [EnemyTrack] = []
+    var minions: [MinionTrack] = []
+    var minionGeometry: MinionBarGeometry?
+    /** When the game last drew a minion bar white or marked (its Last Hit Assist is on), -1e9 before. */
+    var lastHitAssistMs = -1e9
     var selfBar: PixelHit?
     var selfSeenMs = -1e9
     var frameWidth = 0

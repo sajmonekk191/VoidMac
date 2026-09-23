@@ -188,6 +188,15 @@ final class Autoaim: @unchecked Sendable {
                 chosen = fresh.min { $0.fillRatio < $1.fillRatio }
             case .nearest:
                 chosen = nearestToSelf
+            case .priority:
+                func rank(_ enemy: EnemyTrack) -> Int { TargetPriority.rank(of: enemy.champion, order: cfg.targetPriority) }
+                let reachable = fresh.filter { enemy in
+                    guard let spec, spec.range > 0, !spec.isGlobal, let selfPoint else { return true }
+                    return units(vis.targetPoint(enemy, cfg: cfg), selfPoint) <= spec.range * (1 + cfg.aim.rangeTolerance / 100)
+                }
+                chosen = (reachable.isEmpty ? fresh : reachable).min {
+                    rank($0) != rank($1) ? rank($0) < rank($1) : distance(vis.targetPoint($0, cfg: cfg), anchor) < distance(vis.targetPoint($1, cfg: cfg), anchor)
+                }
             case .cursor:
                 let nearCursor = fresh.min { distance(vis.targetPoint($0, cfg: cfg), cursorPx) < distance(vis.targetPoint($1, cfg: cfg), cursorPx) }
                 if let nearCursor, distance(vis.targetPoint(nearCursor, cfg: cfg), cursorPx) <= cfg.aim.cursorRadius * sx {

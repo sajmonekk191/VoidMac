@@ -20,6 +20,13 @@ final class Vision: @unchecked Sendable {
     private let lock = NSLock()
     private var snapshot = VisionSnapshot()
     private var tracks: [EnemyTrack] = []
+    private var minionTracks: [MinionTrack] = []
+    private var nextMinionID = 1
+    private var minionFrame = 0
+    private var lastHitAssistMs = -1e9
+    private var recordedAssistLooks: Set<String> = []
+    /** Frames saved while farming to check offline for missed bars: one per 20 s with a wave in view, six per launch. */
+    private var farmSamples: (count: Int, lastMs: Double) = (0, -1e9)
     private var unknownChampions: Set<String> = []
     private var nextID = 1
     private var lastScannedFrameMs = 0.0
@@ -56,8 +63,28 @@ final class Vision: @unchecked Sendable {
     var isWanted: () -> Bool = { false }
     /** The orbwalker asks for ground motion while it kites, so it can see the champion stop for an attack windup. */
     var motionWanted: () -> Bool = { false }
-    /** Current champion and its Q/W/E/R icon files, so the HUD reader knows what to look for. */
+    /** The orbwalker asks for the minion bars every frame while it farms. */
+    var minionsWanted: () -> Bool = { false }
+    /** With last hitting set up the bars are also followed every fourth frame in between, so a minion already has its health history when farming starts. */
+    var minionsIdle: () -> Bool = { false }
+    /** Current champion and its Q/W/E/R icon files, plus the D/F summoner icons, so the HUD reader knows what to look for. */
     var abilityIcons: () -> (champion: String, files: [String: String]) = { ("", [:]) }
+    /** HUD slots read besides the combo's: the summoner slots the auto Heal/Barrier watches. */
+    var extraHudSlots: () -> [String] = { [] }
+    /** Runs on the vision thread with every published snapshot; must return fast. */
+    var onSnapshot: (VisionSnapshot) -> Void = { _ in }
+
+    /** What one frame yielded, taken while its pixels were locked. */
+    private struct FrameResult {
+        var scan: ScanResult
+        var width: Int
+        var height: Int
+        var flow: (dx: Double, dy: Double, patches: Int)?
+        var ready: [String: Bool]
+        var ring: RangeRing?
+        var minions: [MinionHit]?
+        var minionGeometry: MinionBarGeometry?
+    }
 
     init(game: GameSession, settings: Settings) {
         self.game = game
@@ -102,6 +129,7 @@ final class Vision: @unchecked Sendable {
                     if !snapshot.enemies.isEmpty || snapshot.selfBar != nil { snapshot = VisionSnapshot() }
                 }
                 tracks = []
+                minionTracks = []
                 flowPrevious = []
                 groundPath = []
                 selfBar = nil
@@ -128,7 +156,12 @@ final class Vision: @unchecked Sendable {
         let enemies = enemyPlayers()
         var crop: (hit: PixelHit, job: (image: CGImage, fillX: Double, fillY: Double, scale: Int))?
         let comboSlots = cfg.combos.enabled ? cfg.combo(for: icons.champion).steps.filter { $0.enabled }.map { $0.slot } : []
-        let result: (scan: ScanResult, width: Int, height: Int, flow: (dx: Double, dy: Double, patches: Int)?, ready: [String: Bool], ring: RangeRing?)? = game.capture.withLatestFrame { frame in
+        let hudSlots = comboSlots + extraHudSlots().filter { !comboSlots.contains($0) }
+        let farming = minionsWanted()
+        let followsMinions = farming || minionsIdle()
+        minionFrame += 1
+        let wantsMinions = !suspended && (farming || (followsMinions && minionFrame % 4 == 0))
+        let result: FrameResult? = game.capture.withLatestFrame { frame in
             let config = cfg.detectionConfig(frameWidth: frame.width, frameHeight: frame.height)
             let rect = PixelRect(x: 0, y: 0, width: frame.width, height: frame.height * 85 / 100)
             let scan = PixelSearch.scan(frame, rect: rect, config: config, limit: 24)
@@ -140,20 +173,28 @@ final class Vision: @unchecked Sendable {
                 }
             }
             let flow = !suspended && (motionWanted() || (cfg.aim.enabled && cfg.aim.prediction)) ? measureGroundFlow(frame: frame, now: now) : nil
-            let ready = comboSlots.isEmpty ? [:] : hud.read(frame: frame, champion: icons.champion, icons: icons.files, slots: comboSlots)
+            let ready = hudSlots.isEmpty ? [:] : hud.read(frame: frame, champion: icons.champion, icons: icons.files, slots: hudSlots)
             var ring: RangeRing?
             if cfg.aim.ringCalibration, now - lastRingTryMs >= 200 {
                 lastRingTryMs = now
                 ring = detectRing(frame: frame, scan: scan, cfg: cfg, attackRange: attackRange, now: now)
             }
+            var minions: [MinionHit]?
+            var minionGeometry: MinionBarGeometry?
+            if wantsMinions {
+                let geometry = MinionBarGeometry(frameWidth: frame.width, frameHeight: frame.height)
+                minions = Self.scanMinions(frame, geometry: geometry, white: now - lastHitAssistMs < 60_000, followed: minionTracks.map { (Int($0.x), Int($0.y)) })
+                minionGeometry = geometry
+            }
             if let record { FrameDump.saveAsync(frame, name: record) }
-            return (scan, frame.width, frame.height, flow, ready, ring)
+            return FrameResult(scan: scan, width: frame.width, height: frame.height, flow: flow, ready: ready, ring: ring, minions: minions, minionGeometry: minionGeometry)
         }
         guard let result else { return }
         if result.width != lastFrameSize.width || result.height != lastFrameSize.height {
             if lastFrameSize.width > 0 { Log.info("frame size changed \(lastFrameSize.width)x\(lastFrameSize.height) -> \(result.width)x\(result.height): tracks and range calibration reset") }
             lastFrameSize = (result.width, result.height)
             tracks = []
+            minionTracks = []
             flowPrevious = []
             selfBar = nil
             ring = nil
@@ -238,6 +279,19 @@ final class Vision: @unchecked Sendable {
         }
         names.keep(Set(updated.map(\.id)))
         tracks = updated
+        if let hits = result.minions, let geometry = result.minionGeometry {
+            let followed = MinionTracker.update(minionTracks, with: hits, geometry: geometry, now: now, nextID: &nextMinionID)
+            minionTracks = followed.tracks
+            if let assist = followed.assist { noteLastHitAssist(assist, now: now) }
+            if farming, minionTracks.count >= 3, farmSamples.count < 6, now - farmSamples.lastMs >= 20_000 {
+                farmSamples = (farmSamples.count + 1, now)
+                let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+                lock.withLock { recordName = "farm-\(stamp)" }
+                Log.info("last hit sample frame farm-\(stamp): \(minionTracks.count) minion bars followed")
+            }
+        } else if !followsMinions, !minionTracks.isEmpty {
+            minionTracks = []
+        }
         let center = (x: Double(result.width) / 2, y: Double(result.height) / 2)
         if let own = result.scan.own.min(by: { hypot(Double($0.x) - center.x, Double($0.y) - center.y) < hypot(Double($1.x) - center.x, Double($1.y) - center.y) }) {
             selfBar = own
@@ -273,6 +327,9 @@ final class Vision: @unchecked Sendable {
                                        atMs: now, frameMs: frameMs, scanMicros: micros, groundVx: groundVelocity.x, groundVy: groundVelocity.y, flowPatches: patches)
         published.flowMs = flowMs
         published.motionMs = motionMs
+        published.minions = minionTracks
+        published.minionGeometry = result.minionGeometry
+        published.lastHitAssistMs = lastHitAssistMs
         published.abilityReady = result.ready
         published.hud = hud.status
         published.projection = projection
@@ -286,6 +343,7 @@ final class Vision: @unchecked Sendable {
         snapshot = published
         fresh.broadcast()
         fresh.unlock()
+        onSnapshot(published)
     }
 
     /** The track a scan hit will be matched to: the nearest one within the matching reach. */
@@ -296,6 +354,31 @@ final class Vision: @unchecked Sendable {
             let reach = min(400, 140 + 0.3 * (now - track.lastSeenMs)) * sx
             return hypot(track.centerX - cx, track.y - cy) < reach
         }.min { hypot($0.centerX - cx, $0.y - cy) < hypot($1.centerX - cx, $1.y - cy) }
+    }
+
+    /** Minion bars in the world part of the frame (the bottom HUD and the minimap corner are left out), white ones too while the game's assist is on, plus a white bar wherever a followed bar was not found. */
+    static func scanMinions(_ frame: Frame, geometry: MinionBarGeometry, white: Bool, followed: [(x: Int, y: Int)]) -> [MinionHit] {
+        let worldBottom = frame.height * 85 / 100
+        let mapTop = frame.height * 72 / 100, mapLeft = frame.width * 80 / 100
+        var hits = MinionBars.scan(frame, rect: PixelRect(x: 0, y: 0, width: frame.width, height: mapTop), geometry: geometry, white: white)
+        for hit in MinionBars.scan(frame, rect: PixelRect(x: 0, y: mapTop, width: mapLeft, height: worldBottom - mapTop), geometry: geometry, white: white, limit: max(0, 40 - hits.count))
+        where !hits.contains(where: { abs($0.x - hit.x) <= 3 && abs($0.y - hit.y) <= hit.height + 2 }) {
+            hits.append(hit)
+        }
+        let reach = 6 * geometry.scale
+        let unmatched = followed.filter { place in !hits.contains { abs(Double($0.x - place.x)) <= reach && abs(Double($0.y - place.y)) <= reach } }
+        return hits + MinionBars.whiteBars(frame, at: unmatched, geometry: geometry)
+    }
+
+    /** The game's Last Hit Assist is on: noted for the orbwalker, and the first bar of each look (red with its one-shot part, white) is logged and recorded once per launch so it can be checked. */
+    private func noteLastHitAssist(_ hit: MinionHit, now: Double) {
+        let look = hit.white ? "white" : "mark"
+        if recordedAssistLooks.insert(look).inserted {
+            Log.info("minion bar drawn by the game's Last Hit Assist at (\(hit.x), \(hit.y)): \(hit.white ? "white" : "red") fill \(String(format: "%.1f", hit.fill))/\(hit.span) px" + (hit.mark.map { String(format: ", one-shot part %.1f px", $0) } ?? ""))
+            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+            lock.withLock { recordName = "lasthit-assist-\(look)-\(stamp)" }
+        }
+        lastHitAssistMs = now
     }
 
     /** Crop of the level box, the fill and the name plate above an enemy bar for the text recogniser; at 1× capture the reader doubles it on its own queue, and the fill start is given at that scale. */

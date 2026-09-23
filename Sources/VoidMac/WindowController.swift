@@ -35,6 +35,7 @@ final class WindowController {
     let game: GameSession
     let orbwalker: Orbwalker
     let vision: Vision
+    let defense: AutoDefense
 
     private let panel: KeyablePanel
     private let overlay = RangeOverlay()
@@ -44,13 +45,14 @@ final class WindowController {
     private var escWasDown = false
     private var panelAutoOpened = false
 
-    init(settings: Settings, state: AppState, live: LiveClient, game: GameSession, orbwalker: Orbwalker, vision: Vision) {
+    init(settings: Settings, state: AppState, live: LiveClient, game: GameSession, orbwalker: Orbwalker, vision: Vision, defense: AutoDefense) {
         self.settings = settings
         self.state = state
         self.live = live
         self.game = game
         self.orbwalker = orbwalker
         self.vision = vision
+        self.defense = defense
         gameUI = GameUI(settings: settings, state: state)
 
         panel = KeyablePanel(contentRect: NSRect(x: 0, y: 0, width: 860, height: 560), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -146,14 +148,22 @@ final class WindowController {
         gameUI.marks.update(gameFrame: frame, level: level, items: marks)
     }
 
-    /** Reach ellipse (and enabled spell ranges) around the champion in window px while the activation key is held: sampled in ground units through the vision's projection. */
+    /** Reach ellipse (and enabled spell ranges) around the champion in window px while the activation key is held: sampled in ground units through the vision's projection; while farming, a green ring on every minion one attack kills now. */
     private func updateOverlay(level: NSWindow.Level) {
         let snap = live.snapshot
         let vis = vision.latest
         let frame = game.capture.windowFrame
+        var marks: [RangeOverlay.Extra] = []
+        if settings.lastHit.drawKillable, snap.connected, game.isFocused {
+            for point in orbwalker.killableMinions {
+                let ring = CGMutablePath()
+                ring.addEllipse(in: CGRect(x: point.x - frame.minX - 10, y: point.y - frame.minY - 10, width: 20, height: 20))
+                marks.append(RangeOverlay.Extra(path: ring, colorHex: "#3DDC97"))
+            }
+        }
         guard settings.drawRange, orbwalker.activationHeld, snap.connected, game.isFocused, let projection = vis.projection, vis.frameWidth > 0, frame.width > 0,
               let feet = vis.selfPoint(cfg: settings.engine) else {
-            overlay.update(gameFrame: frame, level: level, colorHex: "", reach: nil, gate: nil, extras: [])
+            overlay.update(gameFrame: frame, level: level, colorHex: "", reach: nil, gate: nil, extras: marks)
             return
         }
         let scaleX = frame.width / Double(vis.frameWidth), scaleY = frame.height / Double(vis.frameHeight)
@@ -184,7 +194,7 @@ final class WindowController {
             marker.addEllipse(in: CGRect(x: target.x - frame.minX - 7, y: target.y - frame.minY - 7, width: 14, height: 14))
             extras.append(RangeOverlay.Extra(path: marker, colorHex: "#FFFFFF"))
         }
-        overlay.update(gameFrame: frame, level: level, colorHex: colorHex, reach: path(radius: reach), gate: gate, extras: extras)
+        overlay.update(gameFrame: frame, level: level, colorHex: colorHex, reach: path(radius: reach), gate: gate, extras: extras + marks)
     }
 
     func startTimers() {
@@ -197,7 +207,7 @@ final class WindowController {
     }
 
     private func tick() {
-        state.refresh(live: live, game: game, orbwalker: orbwalker, vision: vision, settings: settings, menuVisible: gameUI.isVisible)
+        state.refresh(live: live, game: game, orbwalker: orbwalker, vision: vision, defense: defense, settings: settings, menuVisible: gameUI.isVisible)
         let base = max(Int(CGWindowLevelForKey(.screenSaverWindow)), game.capture.windowLayer)
         let level = NSWindow.Level(rawValue: min(base + 2, Int(CGWindowLevelForKey(.maximumWindow))))
         if panel.level != level { panel.level = level }

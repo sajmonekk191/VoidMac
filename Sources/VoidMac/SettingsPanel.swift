@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum PanelTab: String, CaseIterable, Identifiable {
-    case orbwalker, autoaim, combos, detection, extra, status
+    case orbwalker, autoaim, combos, lasthit, defense, detection, extra, status
     var id: String { rawValue }
 
     var title: String {
@@ -9,6 +9,8 @@ enum PanelTab: String, CaseIterable, Identifiable {
         case .orbwalker: return "Orbwalker"
         case .autoaim: return "Autoaim"
         case .combos: return "Combos"
+        case .lasthit: return "Last hit"
+        case .defense: return "Auto Heal"
         case .detection: return "Detection"
         case .extra: return "Extra"
         case .status: return "Status"
@@ -20,6 +22,8 @@ enum PanelTab: String, CaseIterable, Identifiable {
         case .orbwalker: return "bolt.fill"
         case .autoaim: return "scope"
         case .combos: return "list.number"
+        case .lasthit: return "dollarsign.circle.fill"
+        case .defense: return "cross.case.fill"
         case .detection: return "eye.fill"
         case .extra: return "sparkles"
         case .status: return "waveform.path.ecg"
@@ -138,6 +142,8 @@ struct SettingsPanel: View {
                 case .orbwalker: orbwalkerTab
                 case .autoaim: AimTab(settings: settings, state: state)
                 case .combos: ComboTab(settings: settings, state: state)
+                case .lasthit: lastHitTab
+                case .defense: defenseTab
                 case .detection: detectionTab
                 case .extra: extraTab
                 case .status: statusTab
@@ -170,13 +176,21 @@ struct SettingsPanel: View {
                     SettingRow(label: "Click hold on target", hint: "\(settings.clickHoldMs) ms between press and release") { intSlider($settings.clickHoldMs, 1...30) }
                     SettingRow(label: "Delay before return", hint: "\(settings.clickSettleMs) ms; the cursor always stays on the target at least one game frame + 2 ms (the game reads the cursor once per frame), \(state.fps > 0 ? "now \(Int(1000 / state.fps + 2)) ms" : "by fps")") { intSlider($settings.clickSettleMs, 0...40) }
                 }
-                SettingRow(label: "Target selection", hint: settings.targetMode == .center ? "Enemy nearest the screen centre (fastest)" : (settings.targetMode == .lowest ? "Enemy with the lowest HP share" : "Enemy nearest the cursor")) {
+                SettingRow(label: "Target selection", hint: targetHint) {
                     Picker("", selection: $settings.targetMode) {
                         Text("Centre").tag(TargetMode.center)
                         Text("Lowest HP").tag(TargetMode.lowest)
                         Text("Near cursor").tag(TargetMode.cursor)
+                        Text("Priority").tag(TargetMode.priority)
                     }
-                    .pickerStyle(.segmented).labelsHidden().frame(width: 260)
+                    .pickerStyle(.segmented).labelsHidden().frame(width: 330)
+                }
+            }
+            if settings.targetMode == .priority {
+                Card(title: "Priority targets", icon: "list.star") {
+                    Text("The first champion of this list inside attack reach is attacked, the nearest among equals. Rearrange with the arrows: the order is saved per champion and applies in later games too. Autoaim follows it when its target is set to Priority.")
+                        .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                    PriorityList(settings: settings, state: state)
                 }
             }
             Card(title: "Behaviour", icon: "bolt.fill") {
@@ -244,6 +258,9 @@ struct SettingsPanel: View {
                     Slider(value: $settings.clickJitter, in: 0...10, step: 1).frame(width: 220)
                 }
                 SettingRow(label: "Waveclear key", hint: "Hold = kite as usual but every attack is an attack-move at the cursor, so the game hits the nearest unit (clears minions); no combos (default V)") { KeyBindButton(keyCode: $settings.waveclearKeyCode, clearable: true) }
+                SettingRow(label: "Show Range while waveclearing", hint: "Holds the range key (C) while the waveclear key is held") {
+                    Toggle("", isOn: $settings.waveclearShowRange).toggleStyle(.switch).labelsHidden()
+                }
             }
             Card(title: "Kiting", icon: "timer") {
                 Text("Attack → no movement during the windup → move-clicks at the cursor → next attack exactly after 1/AS. Windup: \(windupText).")
@@ -263,6 +280,70 @@ struct SettingsPanel: View {
         }
     }
 
+
+    private var targetHint: String {
+        switch settings.targetMode {
+        case .center: return "Enemy nearest the screen centre (fastest)"
+        case .lowest: return "Enemy with the lowest HP share"
+        case .cursor: return "Enemy nearest the cursor"
+        case .priority: return "The first champion of the priority list in reach"
+        }
+    }
+
+    private var lastHitTab: some View {
+        Group {
+            Card(title: "Last hit", icon: "dollarsign.circle.fill") {
+                Text("Hold the key: the champion kites to the cursor and attacks a minion only when one hit kills it at the health it has now, and not when other units would kill it before the hit lands (latency, the windup and the missile's flight counted). Move-clicks never land on a unit, where the game would take them as an attack order.")
+                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                SettingRow(label: "Last hit key", hint: "Hold in game (default X)") { KeyBindButton(keyCode: $settings.lastHit.keyCode, clearable: true) }
+                SettingRow(label: "Farm while orbwalking", hint: "Holding \(KeyNames.name(settings.activationKeyCode)) with no champion in reach, killable minions get the last hit") {
+                    Toggle("", isOn: $settings.lastHit.whileOrbwalking).toggleStyle(.switch).labelsHidden()
+                }
+                SettingRow(label: "Show Range while last hitting", hint: "Holds the range key (C) while the last hit key is held") {
+                    Toggle("", isOn: $settings.lastHit.showRange).toggleStyle(.switch).labelsHidden()
+                }
+                SettingRow(label: "Mark killable minions", hint: "A green ring on every minion one attack kills now, while farming") {
+                    Toggle("", isOn: $settings.lastHit.drawKillable).toggleStyle(.switch).labelsHidden()
+                }
+            }
+            Card(title: "Damage", icon: "function") {
+                Text("Most accurate with LoL's own Last Hit Assist (Settings → Interface → Health and Resource Bars → Show Last Hit Assist): its white bar already counts items, runes and the minion type. Ranked games do not show it; there the damage is computed from your attack damage (Live Client), the +5 of Doran's items and Tear, the minion's health by type and game time and its armor. Until a hit shows a minion's type, the sturdier of melee and caster is assumed, and every hit that leaves a minion alive corrects the model.")
+                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                SettingRow(label: "Use the game's Last Hit Assist", hint: settings.lastHit.useGameAssist ? "A white minion bar means one attack kills it" : "Only the computed damage is used") {
+                    Toggle("", isOn: $settings.lastHit.useGameAssist).toggleStyle(.switch).labelsHidden()
+                }
+                SettingRow(label: "Damage margin", hint: "\(Int(settings.lastHit.marginPercent)) % of the computed damage held back") {
+                    Slider(value: $settings.lastHit.marginPercent, in: 0...20, step: 1).frame(width: 220)
+                }
+            }
+            Card(title: "This game", icon: "chart.bar.fill") {
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                    StatTile(title: "Last hits", value: "\(state.farm.kills) / \(state.farm.attempts)", color: Theme.ok, icon: "checkmark.circle.fill")
+                    StatTile(title: "Taken by others", value: "\(state.farm.lost)", icon: "person.2.fill")
+                    StatTile(title: "Survived the hit", value: "\(state.farm.survived)", icon: "heart.fill")
+                    StatTile(title: "Damage vs model", value: String(format: "%.2f×", state.farm.efficiency), icon: "function")
+                }
+                Text(state.farm.last.isEmpty ? "No last hit yet." : "Last: \(state.farm.last)").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var defenseTab: some View {
+        Group {
+            Card(title: "Auto Heal / Barrier", icon: "cross.case.fill") {
+                Text("Watches your health through the Live Client (50 times a second below half health) and casts the Heal or Barrier on D or F when it falls to the threshold, counting in the next moments at the current loss. Ready or on cooldown is read from the golden frame of the D/F icon in the HUD, so a spell on cooldown is never pressed. The keys are the D and F keys of the Autoaim tab.")
+                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                SettingRow(label: "Enabled") { Toggle("", isOn: $settings.defense.autoSummoner).toggleStyle(.switch).labelsHidden() }
+                SettingRow(label: "Health threshold", hint: "\(Int(settings.defense.healthPercent)) % of maximum health") {
+                    Slider(value: $settings.defense.healthPercent, in: 5...50, step: 1).frame(width: 220)
+                }
+                SettingRow(label: "Only while losing health", hint: settings.defense.onlyWhenDamaged ? "Low health out of combat (walking to base) keeps the spell" : "Casts at low health even when nothing hits you") {
+                    Toggle("", isOn: $settings.defense.onlyWhenDamaged).toggleStyle(.switch).labelsHidden()
+                }
+                Text("Now: \(state.defenseStatus.isEmpty ? "–" : state.defenseStatus)").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+        }
+    }
 
     private var resetText: String {
         let champion = state.snapshot.championName

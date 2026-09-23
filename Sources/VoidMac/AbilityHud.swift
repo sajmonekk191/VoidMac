@@ -52,27 +52,44 @@ final class AbilityHud: @unchecked Sendable {
     private var lastCheckMs = -1e9
     private var checkFailures = 0
     private var state = HudStatus(message: "HUD: icons not located yet")
+    /** The D/F summoner icons, found right of R once Q/W/E/R are located; `summonerMatched` is false while they sit where the layout puts them but no icon confirmed it. */
+    private var summonerRefs: [IconRef] = []
+    private var summonerSize = 0
+    private var summonerPitch = 0
+    private var summonerFiles: [String: String] = [:]
+    private var summonerMatched = false
+    private var summonerLocating = false
+    private var summonerAttempts = 0
+    private var lastSummonerLocateMs = -1e9
 
     /** The reader's state, taken under the lock its writers use. */
     var status: HudStatus { lock.withLock { state } }
 
     var statusText: String { status.text }
 
-    /** Availability of the asked-for slots in this frame, empty until the icons are located; requests a background locate when needed. */
+    /** Availability of the asked-for slots in this frame (Q/W/E/R, and D/F when their icon files are given), empty until the icons are located; requests a background locate when needed. */
     func read(frame: Frame, champion current: String, icons: [String: String], slots: [String]) -> [String: Bool] {
-        guard !current.isEmpty, icons.count == 4, !slots.isEmpty else { return [:] }
-        let located: (refs: [IconRef], size: Int, pitch: Int, ready: [String: Bool])? = lock.withLock {
-            if champion != current || frameSize.width != frame.width || frameSize.height != frame.height { refs = [] }
-            return refs.isEmpty ? nil : (refs, size, pitch, ready)
+        guard !current.isEmpty, Self.abilitySlots.allSatisfy({ icons[$0] != nil }), !slots.isEmpty else { return [:] }
+        let summonerIcons = icons.filter { Self.summonerSlots.contains($0.key) && !$0.value.isEmpty }
+        let located: (refs: [IconRef], size: Int, pitch: Int, ready: [String: Bool], summoners: [IconRef], summonerSize: Int, summonerPitch: Int, summonersCurrent: Bool)? = lock.withLock {
+            if champion != current || frameSize.width != frame.width || frameSize.height != frame.height {
+                refs = []
+                summonerRefs = []
+            }
+            return refs.isEmpty ? nil : (refs, size, pitch, ready, summonerRefs, summonerSize, summonerPitch, summonerFiles == summonerIcons && (summonerMatched || summonerAttempts >= 5))
         }
         guard let located else {
             requestLocate(frame: frame, champion: current, icons: icons)
             return [:]
         }
+        if slots.contains(where: { summonerIcons[$0] != nil }), !located.summonersCurrent {
+            requestSummonerLocate(frame: frame, icons: summonerIcons)
+        }
         var result: [String: Bool] = [:]
         var readings: [HudReading] = []
-        for ref in located.refs where slots.contains(ref.slot) {
-            let gold = Self.frameLine(frame: frame, x: ref.x, y: ref.y, size: located.size, pitch: located.pitch).gold
+        for ref in located.refs + located.summoners where slots.contains(ref.slot) {
+            let summoner = Self.summonerSlots.contains(ref.slot)
+            let gold = Self.frameLine(frame: frame, x: ref.x, y: ref.y, size: summoner ? located.summonerSize : located.size, pitch: summoner ? located.summonerPitch : located.pitch).gold
             let available = gold >= 0.9 ? true : (gold <= 0.85 ? false : (located.ready[ref.slot] ?? false))
             result[ref.slot] = available
             readings.append(HudReading(slot: ref.slot, ready: available, gold: gold))
@@ -91,11 +108,97 @@ final class AbilityHud: @unchecked Sendable {
             state.readings = readings
             if lost {
                 refs = []
+                summonerRefs = []
                 checkFailures = 0
                 state = HudStatus(message: "HUD: icons lost, locating again")
             }
         }
         return result
+    }
+
+    static let abilitySlots = ["Q", "W", "E", "R"]
+    static let summonerSlots = ["D", "F"]
+
+    /** Finds the D/F icons right of R on the background queue, once per game; until an icon confirms them they sit where the HUD layout puts them and the search repeats every 4 s, five times at most. */
+    private func requestSummonerLocate(frame: Frame, icons: [String: String]) {
+        let now = nowMs()
+        let anchor: (x: Int, y: Int, size: Int, pitch: Int)? = lock.withLock {
+            guard !summonerLocating, now - lastSummonerLocateMs > 4000, let r = refs.first(where: { $0.slot == "R" }) else { return nil }
+            summonerLocating = true
+            lastSummonerLocateMs = now
+            return (r.x, r.y, size, pitch)
+        }
+        guard let anchor else { return }
+        let x0 = min(frame.width - 1, anchor.x + anchor.size / 2), x1 = min(frame.width, anchor.x + anchor.size + 4 * anchor.pitch)
+        let y0 = max(0, anchor.y - anchor.size / 2), y1 = min(frame.height, anchor.y + anchor.size * 3 / 2)
+        guard x1 - x0 > anchor.size, y1 - y0 > anchor.size else {
+            lock.withLock { summonerLocating = false }
+            return
+        }
+        let width = x1 - x0, height = y1 - y0, bytesPerRow = width * 4
+        let copy = UnsafeMutableRawPointer.allocate(byteCount: bytesPerRow * height, alignment: 16)
+        for row in 0..<height {
+            copy.advanced(by: row * bytesPerRow).copyMemory(from: frame.base + (y0 + row) * frame.bytesPerRow + x0 * 4, byteCount: bytesPerRow)
+        }
+        let region = Frame(base: UnsafeRawPointer(copy), width: width, height: height, bytesPerRow: bytesPerRow)
+        let box = StripBox(pointer: copy)
+        queue.async {
+            defer { _ = box }
+            let found = Self.locateSummoners(region: region, origin: (x0, y0), anchor: anchor, icons: icons)
+            self.lock.withLock {
+                self.summonerLocating = false
+                guard self.refs.first(where: { $0.slot == "R" })?.x == anchor.x else { return }
+                self.summonerAttempts = self.summonerFiles == icons ? self.summonerAttempts + 1 : 1
+                self.summonerRefs = found.refs
+                self.summonerSize = found.size
+                self.summonerPitch = found.pitch
+                self.summonerFiles = icons
+                self.summonerMatched = found.matched
+            }
+            Log.info("HUD summoner icons \(found.matched ? "located" : "placed by the HUD layout"): size \(found.size) px, pitch \(found.pitch) px, \(found.note), rects \(found.refs.map { "\($0.slot)(\($0.x),\($0.y))" }.joined(separator: " "))")
+        }
+    }
+
+    /** D/F icon rects in frame px, measured on both HUD sizes: D's inner rect starts 1.33-1.35 ability sizes right of R and F's 2.23-2.33, both 0.74-0.78 of its size and level with it, D to F 1.21-1.24 of their own size. Each icon is matched only in its own slot's window (one icon can look like the other), a missing one is placed from the other, both from R when neither matches. */
+    private static func locateSummoners(region: Frame, origin: (x: Int, y: Int), anchor: (x: Int, y: Int, size: Int, pitch: Int), icons: [String: String]) -> (refs: [IconRef], size: Int, pitch: Int, matched: Bool, note: String) {
+        let plane = GrayPlane(region)
+        var found: [String: Anchor] = [:]
+        var notes: [String] = []
+        let windows = ["D": (120, 150), "F": (205, 255)]
+        for slot in summonerSlots {
+            guard let file = icons[slot], let window = windows[slot], let art = loadIcon(file) else { continue }
+            defer { UnsafeMutableRawPointer(mutating: art.base).deallocate() }
+            var best = Anchor(score: -1, x: 0, y: 0, size: 0)
+            let smallest = anchor.size * 66 / 100, largest = anchor.size * 86 / 100
+            let xs = max(0, anchor.x + anchor.size * window.0 / 100 - origin.x), ys = max(0, anchor.y - origin.y - 10)
+            var size = smallest
+            while size <= largest {
+                let xe = min(region.width - size - 8, anchor.x + anchor.size * window.1 / 100 - origin.x), ye = min(region.height - size - 1, anchor.y - origin.y + 10)
+                if xe >= xs, ye >= ys {
+                    plane.search(template: resample(icon: art, to: size), xs: xs...xe, ys: ys...ye, best: &best)
+                }
+                size += max(1, anchor.size / 30)
+            }
+            notes.append("\(slot) \(file) \(String(format: "%.2f", best.score))")
+            if best.score >= 0.5 { found[slot] = best }
+        }
+        let size = found.isEmpty ? max(8, anchor.size * 76 / 100) : found.values.map(\.size).reduce(0, +) / found.count
+        let pitch = max(size + 4, size * 122 / 100)
+        var d: (x: Int, y: Int)
+        if let hit = found["D"] {
+            d = (origin.x + hit.x, origin.y + hit.y)
+        } else if let hit = found["F"] {
+            d = (origin.x + hit.x - pitch, origin.y + hit.y)
+        } else {
+            d = (anchor.x + anchor.size * 134 / 100, anchor.y)
+        }
+        var f = (x: d.x + pitch, y: d.y)
+        if let hit = found["F"], found["D"] != nil {
+            f = (origin.x + hit.x, origin.y + hit.y)
+        }
+        let refs = [IconRef(slot: "D", x: d.x, y: d.y, gray: Patch(width: 0, height: 0, values: [])),
+                    IconRef(slot: "F", x: f.x, y: f.y, gray: Patch(width: 0, height: 0, values: []))]
+        return (refs, size, max(size + 4, f.x - d.x), !found.isEmpty, notes.isEmpty ? "no summoner icon files" : "match " + notes.joined(separator: ", "))
     }
 
     private func requestLocate(frame: Frame, champion current: String, icons: [String: String]) {
@@ -123,6 +226,10 @@ final class AbilityHud: @unchecked Sendable {
                 if let found {
                     self.everLocated = true
                     self.refs = found.refs
+                    self.summonerRefs = []
+                    self.summonerMatched = false
+                    self.summonerAttempts = 0
+                    self.lastSummonerLocateMs = -1e9
                     self.size = found.size
                     self.pitch = found.pitch
                     self.champion = current

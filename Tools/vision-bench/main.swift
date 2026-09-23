@@ -57,6 +57,10 @@ func describe(_ hits: [PixelHit]) -> String {
     hits.map { "(\($0.x),\($0.y),\($0.width),\($0.height),\($0.fill))" }.joined()
 }
 
+func describe(_ hits: [MinionHit]) -> String {
+    hits.map { "(\($0.x),\($0.y),\($0.height),\(String(format: "%.2f", $0.fill))\($0.white ? ",white" : "")\($0.mark.map { String(format: ",mark %.1f", $0) } ?? ""))" }.joined()
+}
+
 func describe(_ ring: RangeRing?) -> String {
     guard let ring else { return "nil" }
     return "centre \(ring.centre.x),\(ring.centre.y) a \(ring.a) b \(ring.b) inliers \(ring.inliers)/\(ring.candidates) kx \(ring.kx) feet \(ring.feet.x),\(ring.feet.y)"
@@ -84,7 +88,11 @@ if let first = files.first, let frame = load(first) {
 }
 
 var golden: [String] = []
+var minionGolden: [String] = []
+var assistGolden: [String] = []
 var scanTimes: [Double] = []
+var minionTimes: [Double] = []
+var assistTimes: [Double] = []
 var flowTimes: [Double] = []
 var ringTimes: [Double] = []
 var cropTimes: [Double] = []
@@ -102,6 +110,12 @@ for (index, url) in files.enumerated() {
     golden.append("scan \(name) enemies \(describe(scan.enemies)) own \(describe(scan.own))")
     scanTimes.append(measure(iterations) { _ = PixelSearch.scan(frame, rect: rect, config: config, limit: 24) }.median)
     if arguments.contains("--verbose") { print(String(format: "%8.1f µs  %@", scanTimes[scanTimes.count - 1], name)) }
+
+    let minionGeometry = MinionBarGeometry(frameWidth: frame.width, frameHeight: frame.height)
+    minionGolden.append("minions \(name) " + describe(Vision.scanMinions(frame, geometry: minionGeometry, white: false, followed: [])))
+    minionTimes.append(measure(iterations) { _ = Vision.scanMinions(frame, geometry: minionGeometry, white: false, followed: []) }.median)
+    assistGolden.append("minions+white \(name) " + describe(Vision.scanMinions(frame, geometry: minionGeometry, white: true, followed: [])))
+    assistTimes.append(measure(iterations) { _ = Vision.scanMinions(frame, geometry: minionGeometry, white: true, followed: []) }.median)
 
     let patches = Vision.flowPatches(of: frame)
     let panned = translated(frame, dx: 8, dy: -6)
@@ -158,8 +172,12 @@ func summary(_ label: String, _ values: [Double]) {
     print(String(format: "%-28@ frames %3d   median %8.1f µs   mean %8.1f µs   worst %8.1f µs", label as NSString, values.count, sorted[sorted.count / 2], mean, sorted[sorted.count - 1]))
 }
 
+golden += minionGolden + assistGolden
+
 print("vision-bench: \(files.count) frames, \(iterations) timed runs each (median per frame, then across frames)")
 summary("PixelSearch.scan", scanTimes)
+summary("minion bars (while farming)", minionTimes)
+summary("minion bars, game assist on", assistTimes)
 summary("ground flow (8 patches)", flowTimes)
 summary("RangeRingDetector.detect", ringTimes)
 summary("name crop (vision thread)", cropTimes)

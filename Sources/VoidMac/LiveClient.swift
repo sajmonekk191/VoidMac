@@ -30,14 +30,33 @@ struct PlayerSnapshot: Equatable {
     var resourceMax = 0.0
     var resourceType = ""
     var summoners: [String] = []
+    /** Locale-independent ids of the D and F summoner spells ("SummonerHeal"), also their Data Dragon icon names. */
+    var summonerIDs: [String] = []
     var riotId = ""
     var summonerName = ""
     var kills = 0
     var enemies: [EnemyPlayer] = []
     var gameTime = 0.0
+    /** Local clock of the `gameTime` reading, so the game time can be carried forward between the once-a-second polls. */
+    var gameTimeAtMs = 0.0
+    var mapNumber = 0
+    var attackDamage = 0.0
+    var lethality = 0.0
+    var currentGold = 0.0
+    var items: [Int] = []
+
+    /** Game time in seconds now, carried forward from the last reading. */
+    func gameTime(atMs now: Double) -> Double {
+        gameTimeAtMs > 0 ? gameTime + max(0, now - gameTimeAtMs) / 1000 : gameTime
+    }
+
+    /** Summoner slot ("D" or "F") holding the spell with this id, nil when the champion does not have it. */
+    func summonerSlot(of id: String) -> String? {
+        summonerIDs.firstIndex(of: id).map { $0 == 0 ? "D" : "F" }
+    }
 }
 
-/** Polls Riot's Live Client Data API on localhost: the active player 20x per second, the player list twice per second, events once per second. */
+/** Polls Riot's Live Client Data API on localhost: the active player 20x per second (50x under half health, for the auto Heal/Barrier), the player list four times per second, events and game stats once per second. */
 final class LiveClient: NSObject, URLSessionDelegate, @unchecked Sendable {
     private let base = URL(string: "https://127.0.0.1:2999/liveclientdata/")!
     private let lock = NSLock()
@@ -79,11 +98,17 @@ final class LiveClient: NSObject, URLSessionDelegate, @unchecked Sendable {
                     next.championName = Self.championName(of: me)
                     next.isDead = (me?["isDead"] as? Bool) ?? true
                     next.summoners = Self.summonerSpells(of: me)
+                    next.summonerIDs = Self.summonerIDs(of: me)
                     next.enemies = Self.enemies(in: list, me: me)
+                    next.items = ((me?["items"] as? [[String: Any]]) ?? []).compactMap { ($0["itemID"] as? Int) ?? ($0["itemID"] as? Double).map(Int.init) }
                 }
                 if nowMs() - lastEvents > 1000, let events = (fetchJSON("eventdata") as? [String: Any])?["Events"] as? [[String: Any]] {
                     lastEvents = nowMs()
-                    if let stats = fetchJSON("gamestats") as? [String: Any] { next.gameTime = (stats["gameTime"] as? Double) ?? next.gameTime }
+                    if let stats = fetchJSON("gamestats") as? [String: Any] {
+                        next.gameTime = (stats["gameTime"] as? Double) ?? next.gameTime
+                        next.gameTimeAtMs = nowMs()
+                        next.mapNumber = (stats["mapNumber"] as? Int) ?? Int((stats["mapNumber"] as? Double) ?? 0)
+                    }
                     let names = Set([next.summonerName, next.riotId, String(next.riotId.split(separator: "#").first ?? "")].filter { !$0.isEmpty })
                     next.kills = events.filter { ($0["EventName"] as? String) == "ChampionKill" && names.contains(($0["KillerName"] as? String) ?? "") }.count
                 }
@@ -94,7 +119,8 @@ final class LiveClient: NSObject, URLSessionDelegate, @unchecked Sendable {
                 current = next
                 if next.connected { updatedAtMs = nowMs() }
             }
-            sleepMs(next.connected ? 50 : 500)
+            let lowHealth = !next.isDead && next.maxHealth > 0 && next.currentHealth < next.maxHealth / 2
+            sleepMs(next.connected ? (lowHealth ? 20 : 50) : 500)
         }
     }
 
@@ -109,6 +135,9 @@ final class LiveClient: NSObject, URLSessionDelegate, @unchecked Sendable {
         next.resourceValue = number("resourceValue")
         next.resourceMax = number("resourceMax")
         next.resourceType = (stats["resourceType"] as? String) ?? ""
+        next.attackDamage = number("attackDamage")
+        next.lethality = max(number("physicalLethality"), number("armorPenetrationFlat"))
+        next.currentGold = (active["currentGold"] as? Double) ?? 0
         next.level = (active["level"] as? Int) ?? Int((active["level"] as? Double) ?? 0)
         next.riotId = (active["riotId"] as? String) ?? ""
         next.summonerName = (active["summonerName"] as? String) ?? ""
@@ -134,6 +163,16 @@ final class LiveClient: NSObject, URLSessionDelegate, @unchecked Sendable {
     private static func summonerSpells(of player: [String: Any]?) -> [String] {
         guard let spells = player?["summonerSpells"] as? [String: Any] else { return [] }
         return ["summonerSpellOne", "summonerSpellTwo"].map { ((spells[$0] as? [String: Any])?["displayName"] as? String) ?? "" }
+    }
+
+    /** The spell ids inside "GeneratedTip_SummonerSpell_<id>_DisplayName", which stay English in every client language. */
+    static func summonerIDs(of player: [String: Any]?) -> [String] {
+        guard let spells = player?["summonerSpells"] as? [String: Any] else { return [] }
+        return ["summonerSpellOne", "summonerSpellTwo"].map { slot in
+            let raw = ((spells[slot] as? [String: Any])?["rawDisplayName"] as? String) ?? ""
+            guard let start = raw.range(of: "SummonerSpell_"), let end = raw.range(of: "_DisplayName", options: .backwards), start.upperBound <= end.lowerBound else { return "" }
+            return String(raw[start.upperBound..<end.lowerBound])
+        }
     }
 
     /** Players on the other team with the names shown above their bars (Riot ID game name, summoner name, champion name). */

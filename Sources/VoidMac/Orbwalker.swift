@@ -116,17 +116,38 @@ final class Orbwalker: @unchecked Sendable {
     private var waveclearHeld = false
     private var spinning = false
 
+    /** One last-hit attack waiting for its outcome: the minion's bar must be gone and its bounty paid once the hit has landed. */
+    private struct LastHitAttempt {
+        let trackID: Int
+        let impactMs: Double
+        let shares: [MinionKind: Double]
+        let text: String
+    }
+    private var lastHitAttempts: [LastHitAttempt] = []
+    private let learner = LastHitLearner()
+    private var learnerGameTime = 0.0
+    private var goldReadings: [GoldReading] = []
+    /** What the last minion choice saw, for the log while farming finds nothing to kill. */
+    private var farmSurvey = ""
+    private var lastFarmLogMs = -1e9
+    private var farmingSinceMs = -1e9
+    /** The part each minion kind showed in the frame last fitted, kept for the ticks until the next frame. */
+    private var partFit: (atMs: Double, partOf: [MinionKind: Double]) = (-1, [:])
+
     /** Everything other threads read or set, under one lock: the loop publishes, the UI and the vision read, the UI pauses. */
     private struct Shared {
         var status = "starting"
         var aimAllowed = false
         var paused = false
         var activationHeld = false
+        var farming = false
         var windup = 0.0
         var windupMs = 0.0
         var attacks = 0
         var lastAttackMs = -1e9
         var target: (point: CGPoint, text: String, atMs: Double)?
+        var killable: (points: [CGPoint], atMs: Double) = ([], -1e9)
+        var farm = FarmStatus()
     }
 
     private let shared = OSAllocatedUnfairLock(initialState: Shared())
@@ -167,6 +188,17 @@ final class Orbwalker: @unchecked Sendable {
         currentTargetInfo?.point
     }
 
+    /** True while the last-hit key is held, or the orbwalker farms between champion attacks. */
+    var isFarming: Bool { shared.withLock { $0.farming } }
+
+    /** Screen points of the minions one attack kills right now, for the overlay; empty unless farming. */
+    var killableMinions: [CGPoint] {
+        shared.withLock { nowMs() - $0.killable.atMs < 150 ? $0.killable.points : [] }
+    }
+
+    /** Last-hit counters and the last outcome for the panel. */
+    var farmStatus: FarmStatus { shared.withLock { $0.farm } }
+
     /** The chosen enemy's click point and identity text ("Cho'Gath lvl 6 via name") while fresh. */
     var currentTargetInfo: (point: CGPoint, text: String)? {
         shared.withLock { $0.target.flatMap { nowMs() - $0.atMs < 400 ? ($0.point, $0.text) : nil } }
@@ -198,7 +230,12 @@ final class Orbwalker: @unchecked Sendable {
         self.vision = vision
         self.aim = aim
         aim.canAim = { [weak self] in self?.shared.withLock { $0.aimAllowed } ?? false }
-        vision.motionWanted = { [weak self] in self?.activationHeld ?? false }
+        vision.motionWanted = { [weak self] in self?.shared.withLock { $0.activationHeld || $0.farming } ?? false }
+        vision.minionsWanted = { [weak self] in self?.isFarming ?? false }
+        vision.minionsIdle = { [weak self] in
+            guard let lastHit = self?.settings.engine.lastHit else { return false }
+            return lastHit.keyCode != KeyNames.none || lastHit.whileOrbwalking
+        }
     }
 
     /** Tap-thread hook: the activation press is stamped exactly; a manual ability press feeds the cooldown estimate and the cast lockout, and an attack-resetting one lets the next attack go out immediately. */
@@ -275,17 +312,20 @@ final class Orbwalker: @unchecked Sendable {
         }
     }
 
-    /** Holds the Show Range and champion-only binds while the orbwalker is active. */
-    private func holdKeys(_ cfg: EngineSettings) {
+    /** Holds the Show Range bind when `range` and the champion-only bind when `championOnly`, letting go of either one held but not wanted in this mode. */
+    private func holdKeys(_ cfg: EngineSettings, range: Bool, championOnly: Bool) {
         heldKeys.withLock {
-            if cfg.showAttackRange && !rangeKeyHeld {
-                Input.key(cfg.attackRangeKeyCode, down: true)
-                rangeKeyHeld = true
+            if range != rangeKeyHeld {
+                Input.key(cfg.attackRangeKeyCode, down: range)
+                rangeKeyHeld = range
             }
-            if cfg.attackChampionOnly && !championKeyHeld {
+            if championOnly && !championKeyHeld {
                 championHeldViaMouse = cfg.championOnlyMiddleMouse
                 if championHeldViaMouse { Input.middleMouse(down: true) } else { Input.key(cfg.championOnlyKeyCode, down: true) }
                 championKeyHeld = true
+            } else if !championOnly && championKeyHeld {
+                if championHeldViaMouse { Input.middleMouse(down: false) } else { Input.key(cfg.championOnlyKeyCode, down: false) }
+                championKeyHeld = false
             }
         }
     }
@@ -301,9 +341,15 @@ final class Orbwalker: @unchecked Sendable {
                 vision.suspendTracking(until: activationStartMs + Double(cfg.activationDelayMs))
             }
             activationHeld = held
+            resetFarmingIfNewGame(snap)
+            recordGold(snap)
+            if !lastHitAttempts.isEmpty { resolveLastHits(nowMs()) }
             if let blocker = blocker(for: snap) {
                 statusText = blocker
-                shared.withLock { $0.aimAllowed = false }
+                shared.withLock {
+                    $0.aimAllowed = false
+                    $0.farming = false
+                }
                 releaseHeldKeys()
                 sleepMs(20)
                 continue
@@ -318,9 +364,25 @@ final class Orbwalker: @unchecked Sendable {
             }
             handleEmote(snap, cfg)
             waveclearHeld = cfg.waveclearKeyCode != KeyNames.none && Input.isKeyDown(cfg.waveclearKeyCode)
+            let lastHitHeld = !waveclearHeld && cfg.lastHit.keyCode != KeyNames.none && Input.isKeyDown(cfg.lastHit.keyCode)
+            let farming = lastHitHeld || (!waveclearHeld && cfg.lastHit.whileOrbwalking && activationHeld)
+            let wasFarming = shared.withLock { state -> Bool in
+                let was = state.farming
+                state.farming = farming
+                return was
+            }
+            if farming, !wasFarming { farmingSinceMs = nowMs() }
+            if lastHitHeld {
+                statusText = "LAST HIT"
+                holdKeys(cfg, range: cfg.lastHit.showRange, championOnly: cfg.attackChampionOnly)
+                spinning = false
+                comboArmed = false
+                farm(snap, cfg)
+                continue
+            }
             if waveclearHeld {
                 statusText = "WAVECLEAR (attack-move)"
-                releaseHeldKeys()
+                holdKeys(cfg, range: cfg.waveclearShowRange, championOnly: false)
                 spinning = false
                 comboArmed = false
                 waveClear(snap, cfg)
@@ -343,7 +405,7 @@ final class Orbwalker: @unchecked Sendable {
             }
             statusText = "ACTIVE"
             checkTimers()
-            holdKeys(cfg)
+            holdKeys(cfg, range: cfg.showAttackRange, championOnly: cfg.attackChampionOnly)
             step(snap, cfg)
         }
     }
@@ -428,10 +490,15 @@ final class Orbwalker: @unchecked Sendable {
             } else if let target = chooseTarget(vis, range: snap.attackRange, cfg: cfg) {
                 if cfg.attackMode == .attackMove { attackMove(target, cfg) } else { clickAttack(target, cfg, frameAge: Int(frameAge)) }
                 return
+            } else if cfg.lastHit.whileOrbwalking, let minion = chooseMinion(vis, snap: snap, cfg: cfg) {
+                clickMinion(minion, snap: snap, cfg: cfg)
+                return
             } else if now - lastNoTargetLogMs > 5000 {
                 lastNoTargetLogMs = now
                 logNoTarget(vis, cfg)
             }
+        } else if cfg.lastHit.whileOrbwalking, cfg.lastHit.drawKillable {
+            _ = chooseMinion(vision.latest, snap: snap, cfg: cfg)
         }
         if comboArmed, cfg.combos.enabled, pendingClickMs == 0 {
             let fresh = comboFresh
@@ -536,8 +603,8 @@ final class Orbwalker: @unchecked Sendable {
                     guard slackMs >= castMs + deliveryMs + 200 else { continue }
                 }
             }
-            let ownCooldownMs = combo.fullCooldownMs(slot: step.slot, spec: spec, snap: snap)
-            let repressMs = ownCooldownMs > 0 ? min(max(castMs + 500, 1800), ownCooldownMs) : max(castMs + 500, 1800)
+            let hasCooldown = spec?.cooldown.contains(where: { $0 > 0 }) == true
+            let repressMs = hasCooldown ? min(max(castMs + 500, 1800), combo.fullCooldownMs(slot: step.slot, spec: spec, snap: snap)) : max(castMs + 500, Self.uncooledRepressMs)
             if let since = combo.sinceCastMs(slot: step.slot), since < repressMs { continue }
             if hud[step.slot] == true, combo.cooldownRemainingMs(slot: step.slot, spec: spec, snap: snap) > 1500, nowMs() - lastSuspectMs > 20000 {
                 lastSuspectMs = nowMs()
@@ -708,6 +775,7 @@ final class Orbwalker: @unchecked Sendable {
         let anchor = selfPt ?? CGPoint(x: frame.midX, y: frame.midY)
         let score: (AttackTarget) -> Double
         let dummyPenalty: (AttackTarget) -> Double = { $0.track.champion == ChampionModels.dummyKey ? 1e6 : 0 }
+        func rank(_ target: AttackTarget) -> Int { TargetPriority.rank(of: target.track.champion, order: cfg.targetPriority) }
         switch cfg.targetMode {
         case .lowest:
             score = { $0.track.fillRatio + dummyPenalty($0) }
@@ -716,11 +784,18 @@ final class Orbwalker: @unchecked Sendable {
             score = { hypot($0.point.x - cursor.x, $0.point.y - cursor.y) + dummyPenalty($0) }
         case .center:
             score = { hypot($0.point.x - anchor.x, $0.point.y - anchor.y) + dummyPenalty($0) }
+        case .priority:
+            score = { Double(rank($0)) * 1e4 + hypot($0.point.x - anchor.x, $0.point.y - anchor.y) + dummyPenalty($0) }
         }
         guard let best = candidates.min(by: { score($0) < score($1) }) else { return nil }
         var chosen = best
         if cfg.stickyTarget, let current = candidates.first(where: { $0.track.id == targetID }), current.track.id != best.track.id {
-            let keep = cfg.targetMode == .lowest ? score(current) <= score(best) + 0.15 : score(current) <= score(best) * 1.3
+            let keep: Bool
+            switch cfg.targetMode {
+            case .lowest: keep = score(current) <= score(best) + 0.15
+            case .priority: keep = rank(current) == rank(best) && dummyPenalty(current) <= dummyPenalty(best)
+            case .center, .cursor: keep = score(current) <= score(best) * 1.3
+            }
             if keep { chosen = current }
         }
         targetID = chosen.track.id
@@ -789,6 +864,220 @@ final class Orbwalker: @unchecked Sendable {
         }
         let wake = pendingClickMs > 0 ? now + 3 : min(nextMoveMs, max(attackDue, now + 4))
         lastSnapshotMs = vision.waitForFresh(after: lastSnapshotMs, maxMs: min(6, max(1, Int(wake - now)))).atMs
+    }
+
+    /** A minion chosen for a last hit: its track, the click point in screen points, the missile's flight, when the hit lands after the frame, the share it kills up to and why, and each kind's share at the model's full damage (to learn from the hit). */
+    private struct MinionTarget {
+        let track: MinionTrack
+        let point: CGPoint
+        let travelMs: Double
+        let impactMs: Double
+        let killShare: Double
+        let source: String
+        let distance: Double
+        let kind: MinionKind?
+        let shares: [MinionKind: Double]
+    }
+
+    /** Last-hit mode: kites to the cursor on the usual cadence and attacks only a minion our hit kills at its health now; a move-click never goes onto a unit, where the game would take it as an attack order. */
+    private func farm(_ snap: PlayerSnapshot, _ cfg: EngineSettings) {
+        let now = nowMs()
+        if pendingClickMs > 0 { confirmAttack(now, cfg) }
+        let attackDue = lastAttackMs + 1000.0 / snap.attackSpeed
+        let vis = vision.latest
+        let target = now - vis.frameMs <= 100 ? chooseMinion(vis, snap: snap, cfg: cfg) : nil
+        if pendingClickMs == 0, now >= attackDue, let target {
+            clickMinion(target, snap: snap, cfg: cfg)
+            return
+        }
+        if target == nil, now - farmingSinceMs > 500, now - lastFarmLogMs > 2000, now - lastAttackMs > 2000 {
+            lastFarmLogMs = now
+            Log.info("last hit: nothing to kill: \(farmSurvey); frame \(Int(now - vis.frameMs)) ms old, game assist \(now - vis.lastHitAssistMs < 60_000 ? "on" : "not seen")")
+        }
+        if pendingClickMs == 0, now >= nextMoveMs {
+            if cursorOverUnit(vis, cfg: cfg) {
+                nextMoveMs = now + 30
+            } else {
+                moveClick(cfg)
+                nextMoveMs = now + Double(Int.random(in: min(cfg.moveClickMinMs, cfg.moveClickMaxMs)...max(cfg.moveClickMinMs, cfg.moveClickMaxMs)))
+            }
+            return
+        }
+        let wake = pendingClickMs > 0 ? now + 3 : min(nextMoveMs, max(attackDue, now + 4))
+        lastSnapshotMs = vision.waitForFresh(after: lastSnapshotMs, maxMs: min(6, max(1, Int(wake - now)))).atMs
+    }
+
+    /** The minion to last-hit now: in attack reach, at or under the kill share in the frame and alive when our hit lands (latency, the real windup and the missile's flight after the frame it was read in), the click point outside the HUD; a cannon or super minion we learned goes first, then the one closest to dying. Publishes every killable minion for the overlay. */
+    private func chooseMinion(_ vis: VisionSnapshot, snap: PlayerSnapshot, cfg: EngineSettings) -> MinionTarget? {
+        guard let geometry = vis.minionGeometry else {
+            farmSurvey = "no minion scan in the newest frame"
+            return nil
+        }
+        guard let projection = vis.projection, let selfPx = vis.selfPoint(cfg: cfg), vis.frameWidth > 0 else {
+            farmSurvey = "own champion's position unknown"
+            return nil
+        }
+        let now = nowMs()
+        let rules = MinionRules(mapNumber: snap.mapNumber)
+        let upgrades = rules.upgrades(at: snap.gameTime(atMs: now))
+        let traits = ChampionCombat.traits(for: snap.championName) ?? ChampionTraits()
+        var model = AttackDamageModel(attackDamage: snap.attackDamage, bonusVsMinions: snap.items.contains(where: AttackDamageModel.helpingHandItems.contains) ? 5 : 0,
+                                      lethality: snap.lethality, damageDealt: rules == .howlingAbyss ? traits.aramDamageDealt : 1)
+        let shares = Dictionary(uniqueKeysWithValues: MinionKind.allCases.map { ($0, model.share($0, rules: rules, upgrades: upgrades)) })
+        let unarmored = Dictionary(uniqueKeysWithValues: PartKinds.normal.map { ($0, model.damage(armor: 0) / rules.stats($0, upgrades: upgrades).maxHealth) })
+        if partFit.atMs != vis.atMs {
+            partFit = (vis.atMs, PartKinds.fit(vis.minions.filter { $0.lastSeenMs == vis.atMs && !$0.large }.compactMap { $0.mark ?? $0.lastMark }, shares: unarmored))
+        }
+        let partOf = partFit.partOf
+        let superParts = vis.minions.filter { $0.lastSeenMs == vis.atMs && $0.large }.compactMap { $0.mark ?? $0.lastMark }.sorted()
+        model.efficiency = learner.efficiency
+        let assistActive = now - vis.lastHitAssistMs < 120_000
+        let inFlight = Set(lastHitAttempts.filter { now < $0.impactMs + 150 }.map(\.trackID))
+        func armorFactor(_ kind: MinionKind) -> Double { 100 / (100 + max(0, rules.stats(kind, upgrades: upgrades).armor - model.lethality)) }
+        let windupReal = max(0, currentWindupMs - Double(cfg.extraWindupMs))
+        let release = heldKeys.withLock { championKeyHeld } ? onTargetFloorMs(cfg) : 0
+        let delivery = (now - vis.frameMs) + Double(cfg.attackLatencyMs) + windupReal + onTargetFloorMs(cfg) / 2 + release
+        let limit = (snap.attackRange + GroundProjection.gameplayRadius + 48) * (1 + cfg.attackRangeTolerance / 100)
+        var killable: [MinionTarget] = []
+        var seen = 0, followed = 0, inReach = 0
+        var nearest: (gap: Double, text: String)?
+        for track in vis.minions where track.lastSeenMs == vis.atMs {
+            seen += 1
+            guard track.sightings >= 2, track.confirmed, !inFlight.contains(track.id) else { continue }
+            followed += 1
+            let distance = projection.units(CGPoint(x: track.centerX, y: track.y + geometry.feetBelowBar(large: track.large)), selfPx)
+            guard distance <= limit else { continue }
+            inReach += 1
+            let travel = max(0, distance - GroundProjection.gameplayRadius) / traits.projectileSpeed(attackRange: snap.attackRange) * 1000
+            var kind = track.large ? MinionKind.superMinion : (track.mark ?? track.lastMark).flatMap { PartKinds.kind(of: $0, partOf: partOf) } ?? learner.kind(of: track.id)
+            var fittedPart: Double?
+            if track.white, track.lastMark == nil {
+                if track.large {
+                    fittedPart = superParts.isEmpty ? nil : superParts[superParts.count / 2]
+                } else if let possible = partOf.filter({ $0.value >= track.fraction }).min(by: { $0.value * armorFactor($0.key) < $1.value * armorFactor($1.key) }) {
+                    kind = possible.key
+                    fittedPart = possible.value
+                }
+            }
+            let threshold = LastHitPlanner.killShare(track, model: model, rules: rules, upgrades: upgrades, kind: kind, marginPercent: cfg.lastHit.marginPercent,
+                                                     useGameAssist: cfg.lastHit.useGameAssist, assistActive: assistActive, fittedPart: fittedPart)
+            let verdict = LastHitPlanner.verdict(track, impactMs: delivery + travel, killShare: threshold.share)
+            let atImpact = LastHitPlanner.share(track, impactMs: delivery + travel, weight: LastHitPlanner.pessimisticLoss)
+            if nearest.map({ track.fraction - threshold.share < $0.gap }) ?? true {
+                let kills = threshold.share.isFinite ? "\(Self.percent(threshold.share)) %" : "any health"
+                nearest = (track.fraction - threshold.share, "m\(track.id) at \(Self.percent(track.fraction)) % (\(Self.percent(atImpact)) % at the fastest loss when a hit would land), kills up to \(kills) (\(threshold.source)), \(Int(distance)) u: \(verdict)")
+            }
+            guard verdict == .kill else { continue }
+            let point = toPoints(CGPoint(x: track.centerX, y: track.y + geometry.bodyBelowBar(large: track.large)), vis: vis)
+            guard cursorInSafeArea(point) else { continue }
+            let possible = track.large ? shares.filter { $0.key == .superMinion } : shares.filter { $0.key != .superMinion }
+            killable.append(MinionTarget(track: track, point: point, travelMs: travel, impactMs: delivery + travel, killShare: threshold.share, source: threshold.source,
+                                         distance: distance, kind: kind, shares: possible))
+        }
+        farmSurvey = "\(seen) minion bars, \(followed) followed, \(inReach) in reach of \(Int(limit)) u" + (nearest.map { "; nearest to killable \($0.text)" } ?? "")
+        let points = killable.map(\.point)
+        shared.withLock { $0.killable = (points, nowMs()) }
+        return killable.min { a, b in
+            let bigA = a.kind == .siege || a.kind == .superMinion, bigB = b.kind == .siege || b.kind == .superMinion
+            if bigA != bigB { return bigA }
+            return LastHitPlanner.share(a.track, impactMs: a.impactMs, weight: LastHitPlanner.pessimisticLoss) < LastHitPlanner.share(b.track, impactMs: b.impactMs, weight: LastHitPlanner.pessimisticLoss)
+        }
+    }
+
+    /** Right-clicks the minion (Target Champions Only is let go first, or the click would be a move), arms the attack clock and waits for the outcome. */
+    private func clickMinion(_ target: MinionTarget, snap: PlayerSnapshot, cfg: EngineSettings) {
+        if heldKeys.withLock({ championKeyHeld }) {
+            releaseHeldKeys()
+            waitForFrames(1, maxMs: 20)
+        }
+        let previousAttackMs = lastAttackMs
+        let times = rightClick(at: target.point, cfg) { clickedAt in
+            lastAttackMs = clickedAt
+            pendingClickMs = clickedAt
+            pendingTargetID = -1
+            pendingFillAtClick = 0
+            nextMoveMs = .infinity
+            moveLogPendingMs = 0
+            comboArmed = false
+        }
+        attacks += 1
+        let track = target.track
+        let windupReal = max(0, currentWindupMs - Double(cfg.extraWindupMs))
+        let impactAt = times.clickedAt + Double(cfg.attackLatencyMs) + windupReal + target.travelMs
+        let killText = target.killShare.isFinite ? "\(Self.percent(target.killShare)) %" : "any health"
+        let text = "\(Self.percent(track.fraction)) % in the frame, kills up to \(killText) (\(target.source)), hit lands +\(Int(target.impactMs)) ms (losing \(Self.percent(track.lossPerMs * 1000)) %/s), \(Int(target.distance)) u away"
+        lastHitAttempts.append(LastHitAttempt(trackID: track.id, impactMs: impactAt, shares: target.shares, text: text))
+        shared.withLock { $0.farm.attempts += 1 }
+        let gap = previousAttackMs > 0 && times.clickedAt - previousAttackMs < 3000 ? "; \(Int(times.clickedAt - previousAttackMs)) ms after the previous attack" : ""
+        Log.info("last hit m\(track.id): \(text); click (\(Int(times.point.x)), \(Int(times.point.y))) pt, away \(Int(times.awayMs)) ms\(gap)")
+    }
+
+    /** Judges each last-hit attack once its hit had time to land and the gold to arrive, in every mode, so letting go of the key loses nothing: the bar still there means it survived, and the step our hit cut into it teaches the minion's kind and our real damage; gone with a bounty paid around the impact is a kill, gone without one went to someone else. */
+    private func resolveLastHits(_ now: Double) {
+        let vis = vision.latest
+        while let index = lastHitAttempts.firstIndex(where: { now >= $0.impactMs + 450 }) {
+            let attempt = lastHitAttempts.remove(at: index)
+            let outcome: String
+            if let track = vis.minions.first(where: { $0.id == attempt.trackID }), vis.atMs - track.lastSeenMs < 200 {
+                var note = ""
+                if let drop = LastHitLearner.hitDrop(track.samples, impactMs: attempt.impactMs, span: track.span),
+                   let learned = learner.learn(trackID: attempt.trackID, drop: drop, shares: attempt.shares) {
+                    note = "; our hit took \(Self.percent(drop)) %: a \(learned.kind.rawValue) minion, damage " + String(format: "%.2f of the model (efficiency now %.2f)", learned.ratio, learner.efficiency)
+                }
+                outcome = "survived at \(Self.percent(track.fraction)) %" + note
+                shared.withLock { $0.farm.survived += 1 }
+            } else if let bounty = GoldReading.bounty(goldReadings, from: attempt.impactMs - 150, to: attempt.impactMs + 450) {
+                outcome = "killed, +\(Int(bounty.rounded())) gold"
+                shared.withLock { $0.farm.kills += 1 }
+            } else {
+                outcome = "gone without a bounty: another unit took it or it left the view"
+                shared.withLock { $0.farm.lost += 1 }
+            }
+            let efficiency = learner.efficiency
+            shared.withLock {
+                $0.farm.last = outcome
+                $0.farm.efficiency = efficiency
+            }
+            Log.info("last hit m\(attempt.trackID): \(outcome) (\(attempt.text))")
+        }
+    }
+
+    /** True when the cursor rests on a minion's or an enemy champion's body: a move-click there would be an attack order. */
+    private func cursorOverUnit(_ vis: VisionSnapshot, cfg: EngineSettings) -> Bool {
+        guard vis.frameWidth > 0, vis.windowFrame.width > 0 || game.capture.windowFrame.width > 0 else { return false }
+        let cursor = toFrame(Input.mousePosition(), vis: vis)
+        if let geometry = vis.minionGeometry {
+            for minion in vis.minions where vis.atMs - minion.lastSeenMs < 200 {
+                let span = Double(minion.span)
+                if cursor.x >= minion.x - 0.15 * span, cursor.x <= minion.x + 1.15 * span, cursor.y >= minion.y,
+                   cursor.y <= minion.y + geometry.feetBelowBar(large: minion.large) + 8 * geometry.scale { return true }
+            }
+        }
+        for enemy in vis.enemies where vis.atMs - enemy.lastSeenMs < 200 {
+            let feet = vis.feetPoint(enemy, cfg: cfg)
+            if cursor.x >= enemy.x - 0.1 * Double(enemy.width), cursor.x <= enemy.x + Double(enemy.width), cursor.y >= enemy.y, cursor.y <= feet.y { return true }
+        }
+        return false
+    }
+
+    /** A new match (the game clock went back) starts the last-hit learning and counters over. */
+    private func resetFarmingIfNewGame(_ snap: PlayerSnapshot) {
+        guard snap.connected else { return }
+        if snap.gameTime + 5 < learnerGameTime {
+            learner.reset()
+            lastHitAttempts = []
+            goldReadings = []
+            shared.withLock { $0.farm = FarmStatus() }
+        }
+        learnerGameTime = snap.gameTime
+    }
+
+    /** Keeps the last 5 s of the champion's gold, to see a last hit's bounty arrive. */
+    private func recordGold(_ snap: PlayerSnapshot) {
+        guard snap.connected, snap.currentGold != goldReadings.last?.gold else { return }
+        let now = nowMs()
+        goldReadings.append(GoldReading(t: now, gold: snap.currentGold))
+        if let first = goldReadings.first, now - first.t > 5000 { goldReadings.removeAll { now - $0.t > 5000 } }
     }
 
     /** Own champion's ground point in screen points from the vision, when it saw a frame in the last 200 ms. */
@@ -885,12 +1174,23 @@ final class Orbwalker: @unchecked Sendable {
         return 1000 / fps + 2
     }
 
-    /** Right-clicks the target: cursor to the model (with a few px of human jitter), click, cursor straight back; no position query while the cursor is away. */
-    private func clickAttack(_ target: AttackTarget, _ cfg: EngineSettings, frameAge: Int) {
+    /** Times of one right click on a unit, for the attack log. */
+    private struct ClickTimes {
+        let origin: CGPoint
+        let point: CGPoint
+        let clickedAt: Double
+        let awayMs: Double
+        let downMs: Double
+        let upMs: Double
+        let backMs: Double
+    }
+
+    /** Cursor to the point (with a few px of human jitter), right click, one captured frame and the on-target floor, cursor straight back to where the hand is; `clicked` runs the moment the button is up. No position query while the cursor is away. */
+    private func rightClick(at target: CGPoint, _ cfg: EngineSettings, clicked: (Double) -> Void) -> ClickTimes {
         let origin = Input.mousePosition()
         var hand = HandTracker(origin: origin)
         let jitter = cfg.clickJitter * game.capture.windowFrame.width / 1920
-        let point = CGPoint(x: target.point.x + Double.random(in: -jitter...jitter), y: target.point.y + Double.random(in: -jitter...jitter))
+        let point = CGPoint(x: target.x + Double.random(in: -jitter...jitter), y: target.y + Double.random(in: -jitter...jitter))
         let onTarget = max(Double(cfg.clickHoldMs + cfg.clickSettleMs), onTargetFloorMs(cfg))
         let started = nowMs()
         Input.rightMouse(down: true, at: point)
@@ -901,14 +1201,21 @@ final class Orbwalker: @unchecked Sendable {
         Input.rightMouse(down: false, at: point)
         let clickedAt = nowMs()
         let upMs = clickedAt - upStarted
-        let previousAttackMs = lastAttackMs
-        armAttack(target, at: clickedAt, cfg: cfg)
+        clicked(clickedAt)
         waitForFrames(1, maxMs: 25)
         spinUntil(started + onTarget)
         let backStarted = nowMs()
         hand.move(to: origin)
         let backMs = nowMs() - backStarted
-        let away = nowMs() - started
+        return ClickTimes(origin: origin, point: point, clickedAt: clickedAt, awayMs: nowMs() - started, downMs: downMs, upMs: upMs, backMs: backMs)
+    }
+
+    /** Right-clicks the target champion and arms the attack clock at the click. */
+    private func clickAttack(_ target: AttackTarget, _ cfg: EngineSettings, frameAge: Int) {
+        let previousAttackMs = lastAttackMs
+        let times = rightClick(at: target.point, cfg) { armAttack(target, at: $0, cfg: cfg) }
+        let origin = times.origin, point = times.point, clickedAt = times.clickedAt
+        let downMs = times.downMs, upMs = times.upMs, backMs = times.backMs, away = times.awayMs
         attacks += 1
         if !target.track.champion.isEmpty, target.track.champion != ChampionModels.dummyKey, recordedChampions.insert(target.track.champion).inserted {
             vision.requestRecord("champion-\(target.track.champion)-\(Self.stamp())")
@@ -1063,6 +1370,13 @@ final class Orbwalker: @unchecked Sendable {
             lastNoTargetRecordMs = nowMs()
             vision.requestRecord("notarget-\(Self.stamp())")
         }
+    }
+
+    /** A spell without a cooldown (Ashe Q) keeps its icon lit while its buff runs, so the HUD cannot tell when it can be cast again: the combo presses it at most this often. */
+    private static let uncooledRepressMs = 4000.0
+
+    private static func percent(_ share: Double) -> Int {
+        Int((share * 100).rounded())
     }
 
     private static let stampFormatter = ISO8601DateFormatter()

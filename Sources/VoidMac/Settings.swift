@@ -20,18 +20,35 @@ enum AttackMode: String, SettingChoice {
     static let fallback = AttackMode.click
 }
 
-/** Which enemy in reach the orbwalker attacks. */
+/** Which enemy in reach the orbwalker attacks; `priority` follows the user's champion order. */
 enum TargetMode: String, SettingChoice {
-    case center, lowest, cursor
+    case center, lowest, cursor, priority
 
     static let fallback = TargetMode.center
 }
 
-/** Which enemy the autoaim picks. */
+/** Which enemy the autoaim picks; `priority` follows the user's champion order. */
 enum AimTargetMode: String, SettingChoice {
-    case cursor, nearest, lowest
+    case cursor, nearest, lowest, priority
 
     static let fallback = AimTargetMode.cursor
+}
+
+/** Last hitting: the key that farms (kites to the cursor and gives minions only the killing blow), farming from the orbwalker while no champion is in reach, reading the game's Last Hit Assist, the share of our damage held back and the marker over killable minions. */
+struct LastHitSettings: Codable, Equatable {
+    var keyCode: UInt16 = 7
+    var whileOrbwalking = false
+    var useGameAssist = true
+    var marginPercent = 4.0
+    var drawKillable = true
+    var showRange = false
+}
+
+/** Auto Heal/Barrier: cast when health falls to the threshold, optionally only while it is being lost. */
+struct DefenseSettings: Codable, Equatable {
+    var autoSummoner = true
+    var healthPercent = 20.0
+    var onlyWhenDamaged = true
 }
 
 /** How a spell key reaches the game: quick cast, or the key and then a left click. */
@@ -164,6 +181,8 @@ struct EngineSettings: Codable, Equatable {
     var championOnlyKeyCode: UInt16 = 39
     var championOnlyMiddleMouse = false
     var targetMode = TargetMode.center
+    /** Champion keys in the order they are attacked, most wanted first; champions not listed follow by class. */
+    var targetPriority: [String] = []
     var moveClickMinMs = 70
     var moveClickMaxMs = 100
     var defaultWindupPercent = 15.0
@@ -177,6 +196,7 @@ struct EngineSettings: Codable, Equatable {
     var attackResets = true
     var clickJitter = 3.0
     var waveclearKeyCode: UInt16 = 9
+    var waveclearShowRange = false
     var helicopterKeyCode: UInt16 = KeyNames.none
     var helicopterIntervalMs = 60
     var helicopterRadius = 70.0
@@ -185,6 +205,8 @@ struct EngineSettings: Codable, Equatable {
     var emoteCtrl = true
     var aim = AimSettings()
     var combos = ComboSettings()
+    var lastHit = LastHitSettings()
+    var defense = DefenseSettings()
     var layout = LayoutSettings()
     var lastChampion = ""
 
@@ -351,7 +373,8 @@ final class Settings: ObservableObject, @unchecked Sendable {
             stored["aim"] = aim
         }
         var merged = merge(defaults, withoutNulls(stored))
-        let groups: [(key: String, type: any Decodable.Type)] = [("aim", AimSettings.self), ("combos", ComboSettings.self), ("layout", LayoutSettings.self)]
+        let groups: [(key: String, type: any Decodable.Type)] = [("aim", AimSettings.self), ("combos", ComboSettings.self), ("lastHit", LastHitSettings.self),
+                                                                 ("defense", DefenseSettings.self), ("layout", LayoutSettings.self)]
         for group in groups where !decodes(merged[group.key], as: group.type) { merged[group.key] = defaults[group.key] }
         guard let mergedData = try? JSONSerialization.data(withJSONObject: merged), var values = try? JSONDecoder().decode(EngineSettings.self, from: mergedData) else { return nil }
         values.heightFactors = values.heightFactors.filter { plausibleHeightFactor($0.value, champion: $0.key) }

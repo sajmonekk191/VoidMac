@@ -8,6 +8,9 @@ final class AppState: ObservableObject {
     @Published var vision = VisionSnapshot()
     @Published var aimStatus = AimStatus()
     @Published var comboStatus = ComboStatus()
+    @Published var farm = FarmStatus()
+    @Published var farming = false
+    @Published var defenseStatus = ""
     @Published var fps = 0.0
     @Published var scanMicros = 0.0
     @Published var activationHeld = false
@@ -27,8 +30,11 @@ final class AppState: ObservableObject {
     @Published var permissions = PermissionStatus()
     private var slowTick = 0
 
-    func refresh(live: LiveClient, game: GameSession, orbwalker: Orbwalker, vision current: Vision, settings: Settings, menuVisible: Bool = false) {
+    func refresh(live: LiveClient, game: GameSession, orbwalker: Orbwalker, vision current: Vision, defense: AutoDefense, settings: Settings, menuVisible: Bool = false) {
         guard panelVisible || menuVisible else { return }
+        set(\.farm, orbwalker.farmStatus)
+        set(\.farming, orbwalker.isFarming)
+        set(\.defenseStatus, defense.status)
         let snap = live.snapshot
         if snapshot != snap { snapshot = snap }
         let capture = game.capture

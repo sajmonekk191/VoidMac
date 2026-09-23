@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum MenuSection: String, CaseIterable, Identifiable {
-    case orbwalker, autoaim, combos, drawings, detection, extra, status
+    case orbwalker, autoaim, combos, lasthit, defense, drawings, detection, extra, status
     var id: String { rawValue }
 
     var title: String {
@@ -9,6 +9,8 @@ enum MenuSection: String, CaseIterable, Identifiable {
         case .orbwalker: return "Orbwalker"
         case .autoaim: return "Autoaim"
         case .combos: return "Combos"
+        case .lasthit: return "Last hit"
+        case .defense: return "Auto Heal / Barrier"
         case .drawings: return "Drawings"
         case .detection: return "Detection"
         case .extra: return "Extra"
@@ -21,6 +23,8 @@ enum MenuSection: String, CaseIterable, Identifiable {
         case .orbwalker: return "bolt.fill"
         case .autoaim: return "scope"
         case .combos: return "list.number"
+        case .lasthit: return "dollarsign.circle.fill"
+        case .defense: return "cross.case.fill"
         case .drawings: return "paintbrush.pointed.fill"
         case .detection: return "eye.fill"
         case .extra: return "sparkles"
@@ -196,6 +200,8 @@ struct SectionBadge: View {
         switch section {
         case .autoaim: return settings.aim.enabled
         case .combos: return settings.combos.enabled
+        case .lasthit: return settings.lastHit.keyCode != KeyNames.none || settings.lastHit.whileOrbwalking
+        case .defense: return settings.defense.autoSummoner
         case .drawings: return settings.drawRange
         case .detection: return settings.identifyChampions
         case .orbwalker: return state.engineStatus == "ACTIVE" || state.engineStatus.hasPrefix("ready")
@@ -329,6 +335,8 @@ struct SectionRows: View {
             case .orbwalker: OrbwalkerRows(settings: settings, state: state)
             case .autoaim: AutoaimRows(settings: settings, state: state)
             case .combos: ComboRows(settings: settings, state: state)
+            case .lasthit: LastHitRows(settings: settings, state: state)
+            case .defense: DefenseRows(settings: settings, state: state)
             case .drawings: DrawingRows(settings: settings, state: state)
             case .detection: DetectionRows(settings: settings, state: state)
             case .extra: ExtraRows(settings: settings)
@@ -353,7 +361,12 @@ struct OrbwalkerRows: View {
                 MRow(label: "Left-click after the key", hint: "For the default LoL bind A (waits for a click)") { MToggle(isOn: $settings.attackMoveClick) }
             }
             MRow(label: "Target", hint: "Which enemy in reach is attacked") {
-                MPicker(selection: $settings.targetMode, options: [(TargetMode.center, "Nearest to me"), (.lowest, "Lowest HP"), (.cursor, "Near cursor")])
+                MPicker(selection: $settings.targetMode, options: [(TargetMode.center, "Nearest to me"), (.lowest, "Lowest HP"), (.cursor, "Near cursor"), (.priority, "Priority list")])
+            }
+            if settings.targetMode == .priority {
+                MBlock(label: "Priority", hint: "The first champion of the list in reach is attacked, the nearest among equals; the order is kept for later games") {
+                    PriorityList(settings: settings, state: state, compact: true)
+                }
             }
             MRow(label: "Sticky target", hint: "Keeps the last target while it stays in reach") { MToggle(isOn: $settings.stickyTarget) }
             MRow(label: "Only targets in reach", hint: "A click on an enemy out of reach would be a walk toward it") { MToggle(isOn: $settings.attackOnlyInRange) }
@@ -377,6 +390,7 @@ struct OrbwalkerRows: View {
             MRow(label: "Click humanisation", hint: "Random px around the click point") { MSlider(value: $settings.clickJitter, range: 0...10, unit: " px") }
             MRow(label: "AA reset after abilities", hint: "Abilities that reset the attack timer let the next attack go at once") { MToggle(isOn: $settings.attackResets) }
             MRow(label: "Waveclear key", hint: "Hold = kite as usual but every attack is an attack-move at the cursor, so the game hits the nearest unit (clears minions); no combos") { KeyBindButton(keyCode: $settings.waveclearKeyCode, clearable: true, compact: true) }
+            MRow(label: "Show Range (C) while waveclearing", hint: "Holds the game's range key while the waveclear key is held") { MToggle(isOn: $settings.waveclearShowRange) }
         }
     }
 }
@@ -389,7 +403,9 @@ struct AutoaimRows: View {
         Group {
             MRow(label: "Autoaim", hint: "Q/W/E/R are held back, the cursor moves onto the enemy, then the key is sent") { MToggle(isOn: $settings.aim.enabled) }
             MRow(label: "Cast mode") { MPicker(selection: $settings.aim.castMode, options: [(CastMode.quick, "Quick cast"), (.normal, "Key + click")]) }
-            MRow(label: "Target") { MPicker(selection: $settings.aim.targetMode, options: [(AimTargetMode.cursor, "Near cursor"), (.nearest, "Nearest"), (.lowest, "Lowest HP")]) }
+            MRow(label: "Target", hint: "Priority list = the order set in the Orbwalker section") {
+                MPicker(selection: $settings.aim.targetMode, options: [(AimTargetMode.cursor, "Near cursor"), (.nearest, "Nearest"), (.lowest, "Lowest HP"), (.priority, "Priority list")])
+            }
             if settings.aim.targetMode == .cursor {
                 MRow(label: "Cursor radius", hint: "px at 1920×1080 around the cursor") { MSlider(value: $settings.aim.cursorRadius, range: 100...900, step: 10, unit: " px") }
             }
@@ -488,6 +504,45 @@ struct ComboRows: View {
     }
 }
 
+
+struct LastHitRows: View {
+    @ObservedObject var settings: Settings
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        Group {
+            MRow(label: "Last hit key", hint: "Hold: kites to the cursor and attacks only minions one hit kills now that live until it lands") {
+                KeyBindButton(keyCode: $settings.lastHit.keyCode, clearable: true, compact: true)
+            }
+            MRow(label: "Farm while orbwalking", hint: "Holding the activation key with no champion in reach, killable minions get the last hit") { MToggle(isOn: $settings.lastHit.whileOrbwalking) }
+            MRow(label: "Show Range (C) while last hitting", hint: "Holds the game's range key while the last hit key is held") { MToggle(isOn: $settings.lastHit.showRange) }
+            MRow(label: "Use the game's Last Hit Assist", hint: "LoL: Settings → Interface → Health and Resource Bars → Show Last Hit Assist. Its white bar is exact (items, runes, minion type); not in ranked") {
+                MToggle(isOn: $settings.lastHit.useGameAssist)
+            }
+            MRow(label: "Damage margin", hint: "Share of our computed damage held back when the game's assist cannot be read") { MSlider(value: $settings.lastHit.marginPercent, range: 0...20, unit: " %") }
+            MRow(label: "Mark killable minions", hint: "Green ring on every minion one attack kills now, while farming") { MToggle(isOn: $settings.lastHit.drawKillable) }
+            MInfo(label: "Last hits · lost · survived", value: "\(state.farm.kills)/\(state.farm.attempts) · \(state.farm.lost) · \(state.farm.survived)", color: Theme.ok)
+            MInfo(label: "Damage vs model", value: String(format: "%.2f×", state.farm.efficiency))
+            MInfo(label: "Last", value: state.farm.last.isEmpty ? "–" : state.farm.last, color: Theme.accent2)
+        }
+    }
+}
+
+struct DefenseRows: View {
+    @ObservedObject var settings: Settings
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        Group {
+            MRow(label: "Auto Heal / Barrier", hint: "Casts the Heal or Barrier on D/F when health falls to the threshold; ready is read from the HUD") { MToggle(isOn: $settings.defense.autoSummoner) }
+            MRow(label: "Health threshold", hint: "Cast at or under this share of maximum health, the next moments of the current loss counted in") {
+                MSlider(value: $settings.defense.healthPercent, range: 5...50, unit: " %")
+            }
+            MRow(label: "Only while losing health", hint: "Low health out of combat (walking to base) keeps the spell") { MToggle(isOn: $settings.defense.onlyWhenDamaged) }
+            MInfo(label: "Now", value: state.defenseStatus.isEmpty ? "–" : state.defenseStatus, color: Theme.accent2)
+        }
+    }
+}
 
 struct DrawingRows: View {
     @ObservedObject var settings: Settings

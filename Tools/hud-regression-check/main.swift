@@ -164,6 +164,36 @@ if let kayleFrame = load(fixture(kayleAnchor)) {
     failures.append("cannot read the Kayle anchor fixture")
 }
 
+print("asserting the D/F summoner icons are found right of R and read (Kayle, 3600x2144: Ghost on D, Flash on F)")
+let summonerIcons = kayleIcons.merging(["D": "SummonerHaste.png", "F": "SummonerFlash.png"]) { $1 }
+let summonerExpectations: [(file: String, note: String, ready: [String: Bool])] = [
+    ("champion-katarina-2026-09-22T21-07-23Z.png", "Ghost on cooldown (189 s), Flash ready", ["D": false, "F": true]),
+    ("notarget-2026-09-22T21-10-16Z.png", "both on cooldown (16 s and 130 s)", ["D": false, "F": false]),
+    ("frame-2026-09-22T21-18-33Z-hit-2271-182.png", "Ghost on cooldown (18 s), Flash ready", ["D": false, "F": true]),
+    ("miss-2026-09-22T21-16-16Z-341.png", "both on cooldown (156 s and 111 s)", ["D": false, "F": false]),
+]
+for expectation in summonerExpectations {
+    guard let frame = load(fixture(expectation.file)) else {
+        failures.append("\(expectation.file): cannot be read")
+        continue
+    }
+    let reader = AbilityHud()
+    var got: [String: Bool] = [:]
+    for _ in 0..<200 {
+        got = reader.read(frame: frame, champion: "Kayle", icons: summonerIcons, slots: ["D", "F"])
+        if got["D"] != nil, got["F"] != nil { break }
+        usleep(50_000)
+        Clock.ms += 1000
+    }
+    var shown: [String] = []
+    for slot in ["D", "F"] {
+        let want = expectation.ready[slot]!
+        shown.append("\(slot) \(got[slot] == nil ? "?" : (got[slot]! ? "✓" : "✗"))")
+        if got[slot] != want { failures.append("\(expectation.file) \(slot): expected \(mark(want)), got \(mark(got[slot]))") }
+    }
+    print("  \(shown.joined(separator: " "))  \(expectation.file) — \(expectation.note)")
+}
+
 print("asserting a border that is neither gold nor grey still produces a verdict")
 if let dark = load(fixture(anchorName)) {
     paintBlack(dark, slot: 1)

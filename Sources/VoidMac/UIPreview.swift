@@ -18,10 +18,13 @@ enum UIPreview {
         snap.level = 14
         snap.attackSpeed = 1.234
         snap.attackRange = 500
-        snap.enemies = [EnemyPlayer(champion: "chogath", championName: "Cho'Gath", level: 12, names: ["Cho'Gath"]), EnemyPlayer(champion: "annie", championName: "Annie", level: 9, names: ["Annie"])]
+        snap.enemies = [EnemyPlayer(champion: "chogath", championName: "Cho'Gath", level: 12, names: ["Cho'Gath"]), EnemyPlayer(champion: "annie", championName: "Annie", level: 9, names: ["Annie"]),
+                        EnemyPlayer(champion: "jinx", championName: "Jinx", level: 11, names: ["Jinx"])]
         state.snapshot = snap
         state.windup = 15
         state.windupMs = 190
+        state.farm = FarmStatus(attempts: 14, kills: 12, lost: 1, survived: 1, last: "killed, +21 gold", efficiency: 0.97)
+        state.defenseStatus = "Heal on D: ready, health 62 %"
         let ui = GameUIState()
         let actions = GameMenuActions(pop: { _ in }, dock: { _ in }, close: {})
         try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
@@ -30,6 +33,16 @@ enum UIPreview {
         shoot(AnyView(GameMenuView(settings: settings, state: state, ui: ui, actions: actions)), folder: folder, name: "menu-folded.png")
         shoot(AnyView(GameWidgetView(section: .combos, settings: settings, state: state, actions: actions)), folder: folder, name: "widget-combos.png")
         shoot(AnyView(GameWidgetView(section: .status, settings: settings, state: state, actions: actions)), folder: folder, name: "widget-status.png")
+        shoot(AnyView(GameWidgetView(section: .lasthit, settings: settings, state: state, actions: actions)), folder: folder, name: "widget-lasthit.png")
+        shoot(AnyView(GameWidgetView(section: .defense, settings: settings, state: state, actions: actions)), folder: folder, name: "widget-defense.png")
+        let priority = Settings(values: settings.values)
+        priority.targetMode = .priority
+        shoot(AnyView(GameWidgetView(section: .orbwalker, settings: priority, state: state, actions: actions)), folder: folder, name: "widget-orbwalker-priority.png")
+        let panelActions = PanelActions(close: {}, refreshPreview: {}, savePNG: {}, recheckPermissions: {}, openPrivacySettings: { _ in }, relaunch: {}, revealConfig: {}, resetSettings: {})
+        for tab in [PanelTab.orbwalker, .lasthit, .defense] {
+            state.tab = tab
+            shoot(AnyView(SettingsPanel(settings: priority, state: state, actions: panelActions)), folder: folder, name: "panel-\(tab.rawValue).png")
+        }
         shoot(AnyView(BadgeView(state: state, open: false) {}), folder: folder, name: "badge.png")
     }
 

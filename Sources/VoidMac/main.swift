@@ -33,6 +33,10 @@ let game = GameSession(settings: settings)
 let vision = Vision(game: game, settings: settings)
 let autoaim = Autoaim(settings: settings, live: live, game: game, vision: vision)
 let orbwalker = Orbwalker(settings: settings, live: live, game: game, vision: vision, aim: autoaim)
+let defense = AutoDefense(settings: settings, live: live, game: game)
+defense.paused = { orbwalker.paused }
+vision.onSnapshot = { defense.observe($0) }
+vision.extraHudSlots = { defense.watchedSlots() }
 vision.isWanted = { live.snapshot.connected && game.isFocused }
 vision.attackRange = { live.snapshot.attackRange }
 vision.enemyPlayers = { live.snapshot.enemies }
@@ -47,6 +51,7 @@ vision.abilityIcons = {
     for slot in ["Q", "W", "E", "R"] {
         if let spec = Spells.resolve(abilityID: snap.abilities[slot]?.id ?? "", champion: snap.championName, slot: slot), !spec.image.isEmpty { files[slot] = spec.image }
     }
+    for (index, id) in snap.summonerIDs.enumerated() where !id.isEmpty && index < 2 { files[index == 0 ? "D" : "F"] = id + ".png" }
     return (snap.championName, files)
 }
 InputMonitor.shared.interceptor = { code, down, isRepeat in autoaim.intercept(keyCode: code, down: down, isRepeat: isRepeat) }
@@ -87,7 +92,7 @@ let autosave = settings.objectWillChange
 let windows: WindowController = MainActor.assumeIsolated {
     let state = AppState()
     state.permissions = initialPermissions
-    let controller = WindowController(settings: settings, state: state, live: live, game: game, orbwalker: orbwalker, vision: vision)
+    let controller = WindowController(settings: settings, state: state, live: live, game: game, orbwalker: orbwalker, vision: vision, defense: defense)
     controller.startTimers()
     controller.showPanelAfterLaunch()
     return controller
